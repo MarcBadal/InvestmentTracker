@@ -104,6 +104,61 @@
       </div>
     </div>
   </div>
+
+  <div class="toolbar history-toolbar">
+    <label for="history-range">Historial:</label>
+    <select id="history-range">
+      <option value="1y">1 a&ntilde;o</option>
+      <option value="2y" selected>2 a&ntilde;os</option>
+      <option value="5y">5 a&ntilde;os</option>
+      <option value="max">M&aacute;ximo</option>
+    </select>
+    <button id="history-refresh-btn" type="button">Cargar evoluci&oacute;n</button>
+    <span id="history-status"></span>
+  </div>
+
+  <div class="layout">
+    <div class="card">
+      <h2>Evoluci&oacute;n de la cartera</h2>
+      <div class="chart-block">
+        <h3>Valor total</h3>
+        <div class="line-chart-wrap" id="chart-total-wrap">
+          <svg id="chart-total" viewBox="0 0 640 240" role="img" aria-label="Evoluci&oacute;n del valor total de la cartera"></svg>
+          <div class="chart-tooltip" id="chart-total-tooltip" hidden></div>
+        </div>
+        <details class="table-view">
+          <summary>Ver como tabla</summary>
+          <div id="chart-total-table"></div>
+        </details>
+      </div>
+      <div class="chart-block">
+        <h3>Por activo</h3>
+        <div class="line-chart-wrap" id="chart-assets-wrap">
+          <svg id="chart-assets" viewBox="0 0 640 240" role="img" aria-label="Evoluci&oacute;n del valor de cada activo"></svg>
+          <div class="chart-tooltip" id="chart-assets-tooltip" hidden></div>
+        </div>
+        <div class="legend" id="chart-assets-legend"></div>
+        <details class="table-view">
+          <summary>Ver como tabla</summary>
+          <div id="chart-assets-table"></div>
+        </details>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Proyecci&oacute;n a 5-10 a&ntilde;os</h2>
+      <div class="line-chart-wrap" id="chart-projection-wrap">
+        <svg id="chart-projection" viewBox="0 0 640 240" role="img" aria-label="Proyecci&oacute;n del valor de la cartera a 5 y 10 a&ntilde;os"></svg>
+        <div class="chart-tooltip" id="chart-projection-tooltip" hidden></div>
+      </div>
+      <div class="legend" id="chart-projection-legend"></div>
+      <p class="projection-note" id="projection-note"></p>
+      <details class="table-view">
+        <summary>Ver como tabla</summary>
+        <div id="chart-projection-table"></div>
+      </details>
+    </div>
+  </div>
 </main>
 <script src="app.js"></script>
 </body>

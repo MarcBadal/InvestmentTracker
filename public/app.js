@@ -13,12 +13,78 @@ const TIPO_ACTIVO_MAP = {
   etf: "ETF",
 };
 
-function loadHoldings() {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
-  } catch {
-    return [];
+const MOVEMENT_TYPES = {
+  compra: { label: "Compra", tipo: "entrada" },
+  suscripcion: { label: "Suscripción", tipo: "entrada" },
+  transferencia_entrada: { label: "Transferencia (entrada)", tipo: "entrada" },
+  venta: { label: "Venta", tipo: "salida" },
+  reembolso: { label: "Reembolso", tipo: "salida" },
+  transferencia_salida: { label: "Transferencia (salida)", tipo: "salida" },
+};
+
+function replayMovements(movements) {
+  let qty = 0;
+  let costNative = 0;
+  const sorted = [...movements].sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
+  for (const m of sorted) {
+    const info = MOVEMENT_TYPES[m.kind];
+    if (!info) continue;
+    if (info.tipo === "entrada") {
+      qty += m.titulos;
+      costNative += m.titulos * m.precioUnitario;
+    } else if (qty > 0) {
+      const avgNative = costNative / qty;
+      const removeQty = Math.min(m.titulos, qty);
+      costNative -= avgNative * removeQty;
+      qty -= removeQty;
+    }
   }
+  return { qty, costNative };
+}
+
+const CATEGORICAL_HUES = [
+  { light: "#2a78d6", dark: "#3987e5" },
+  { light: "#eb6834", dark: "#d95926" },
+  { light: "#1baf7a", dark: "#199e70" },
+  { light: "#eda100", dark: "#c98500" },
+  { light: "#e87ba4", dark: "#d55181" },
+  { light: "#008300", dark: "#008300" },
+  { light: "#4a3aa7", dark: "#9085e9" },
+  { light: "#e34948", dark: "#e66767" },
+];
+const OTROS_COLOR = { light: "#898781", dark: "#898781" };
+
+function recomputeHolding(h) {
+  const { qty, costNative } = replayMovements(h.movements);
+  h.quantity = qty;
+  h.avgCostNative = qty > 0 ? costNative / qty : 0;
+}
+
+function ensureMovements(h) {
+  if (!h.movements || h.movements.length === 0) {
+    h.movements = [
+      {
+        id: crypto.randomUUID(),
+        fecha: new Date().toISOString().slice(0, 10),
+        kind: "compra",
+        titulos: h.quantity ?? 0,
+        precioUnitario: h.avgCostNative ?? h.buyPrice ?? 0,
+        divisa: h.currency || "EUR",
+      },
+    ];
+  }
+  return h.movements;
+}
+
+function loadHoldings() {
+  let data;
+  try {
+    data = JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+  } catch {
+    data = [];
+  }
+  data.forEach(ensureMovements);
+  return data;
 }
 
 function saveHoldings(holdings) {
@@ -42,6 +108,7 @@ function isDarkMode() {
 
 let holdings = loadHoldings();
 let fxRate = null; // USD por 1 EUR (par EURUSD=X)
+const expandedIds = new Set();
 
 function toEUR(amountNative, currency) {
   if (currency === "EUR" || amountNative == null) return amountNative;
@@ -79,6 +146,40 @@ function renderTiles(rows) {
   pctEl.className = "value " + (gainPct >= 0 ? "good" : "bad");
 }
 
+function renderMovementsPanel(holding) {
+  const movs = [...holding.movements].sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
+  const rows = movs
+    .map(
+      (m) => `
+      <tr data-movement-id="${m.id}">
+        <td><input type="date" class="mov-fecha" value="${m.fecha}"></td>
+        <td>
+          <select class="mov-kind">
+            ${Object.entries(MOVEMENT_TYPES)
+              .map(([k, v]) => `<option value="${k}" ${m.kind === k ? "selected" : ""}>${v.label}</option>`)
+              .join("")}
+          </select>
+        </td>
+        <td><input type="number" step="any" min="0" class="mov-titulos" value="${m.titulos}"></td>
+        <td><input type="number" step="any" min="0" class="mov-precio" value="${m.precioUnitario}"></td>
+        <td class="remove"><button class="mov-delete" title="Eliminar movimiento">✕</button></td>
+      </tr>`
+    )
+    .join("");
+
+  return `
+    <div class="movements-panel" data-holding-id="${holding.id}">
+      <table class="movements-table">
+        <thead>
+          <tr><th>Fecha</th><th>Operaci&oacute;n</th><th>T&iacute;tulos</th><th>Precio unitario (${holding.currency})</th><th></th></tr>
+        </thead>
+        <tbody>${rows || `<tr><td colspan="5" class="empty-movements">Sin movimientos registrados.</td></tr>`}</tbody>
+      </table>
+      <button type="button" class="mov-add">+ A&ntilde;adir movimiento</button>
+    </div>
+  `;
+}
+
 function renderTable(rows) {
   const body = document.getElementById("holdings-body");
   const emptyState = document.getElementById("empty-state");
@@ -87,10 +188,12 @@ function renderTable(rows) {
   emptyState.hidden = rows.length > 0;
 
   rows.forEach((r) => {
+    const expanded = expandedIds.has(r.id);
     const tr = document.createElement("tr");
+    tr.className = "holding-row";
     const warn = r.quoteError ? ` title="No se pudo actualizar el precio: ${r.quoteError}"` : "";
     tr.innerHTML = `
-      <td class="symbol"${warn}>${r.symbol}${r.quoteError ? " ⚠" : ""}</td>
+      <td class="symbol"${warn}><button class="toggle-movements" type="button" data-id="${r.id}">${expanded ? "▾" : "▸"}</button> ${r.symbol}${r.quoteError ? " ⚠" : ""}</td>
       <td>${r.type}</td>
       <td>${r.quantity}</td>
       <td>${fmtMoney(r.avgCostNative, r.currency)}</td>
@@ -98,17 +201,91 @@ function renderTable(rows) {
       <td>${fmtMoney(r.price, r.currency)}</td>
       <td>${fmtMoney(r.marketValueEUR)}</td>
       <td class="gain ${r.gainEUR >= 0 ? "good" : "bad"}">${r.gainEUR >= 0 ? "▲" : "▼"} ${fmtMoney(Math.abs(r.gainEUR))} (${fmtPct(r.gainPct)})</td>
-      <td class="remove"><button title="Eliminar" data-id="${r.id}">✕</button></td>
+      <td class="remove"><button class="remove-holding" title="Eliminar" data-id="${r.id}">✕</button></td>
     `;
     body.appendChild(tr);
-  });
 
-  body.querySelectorAll("button[data-id]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      holdings = holdings.filter((h) => h.id !== btn.dataset.id);
+    const movTr = document.createElement("tr");
+    movTr.className = "movements-row";
+    movTr.hidden = !expanded;
+    const td = document.createElement("td");
+    td.colSpan = 9;
+    td.innerHTML = renderMovementsPanel(r);
+    movTr.appendChild(td);
+    body.appendChild(movTr);
+  });
+}
+
+function initHoldingsTableEvents() {
+  const body = document.getElementById("holdings-body");
+
+  body.addEventListener("click", (e) => {
+    const toggleBtn = e.target.closest(".toggle-movements");
+    if (toggleBtn) {
+      const id = toggleBtn.dataset.id;
+      if (expandedIds.has(id)) expandedIds.delete(id);
+      else expandedIds.add(id);
+      render();
+      return;
+    }
+
+    const delHoldingBtn = e.target.closest("button.remove-holding");
+    if (delHoldingBtn) {
+      holdings = holdings.filter((h) => h.id !== delHoldingBtn.dataset.id);
+      expandedIds.delete(delHoldingBtn.dataset.id);
       saveHoldings(holdings);
       render();
-    });
+      return;
+    }
+
+    const addMovBtn = e.target.closest(".mov-add");
+    if (addMovBtn) {
+      const holdingId = addMovBtn.closest(".movements-panel").dataset.holdingId;
+      const holding = holdings.find((h) => h.id === holdingId);
+      holding.movements.push({
+        id: crypto.randomUUID(),
+        fecha: new Date().toISOString().slice(0, 10),
+        kind: "compra",
+        titulos: 0,
+        precioUnitario: 0,
+        divisa: holding.currency || "EUR",
+      });
+      recomputeHolding(holding);
+      saveHoldings(holdings);
+      render();
+      return;
+    }
+
+    const delMovBtn = e.target.closest(".mov-delete");
+    if (delMovBtn) {
+      const panel = delMovBtn.closest(".movements-panel");
+      const holding = holdings.find((h) => h.id === panel.dataset.holdingId);
+      const movId = delMovBtn.closest("tr").dataset.movementId;
+      holding.movements = holding.movements.filter((m) => m.id !== movId);
+      recomputeHolding(holding);
+      saveHoldings(holdings);
+      render();
+    }
+  });
+
+  body.addEventListener("change", (e) => {
+    const panel = e.target.closest(".movements-panel");
+    if (!panel) return;
+    const movRow = e.target.closest("tr[data-movement-id]");
+    if (!movRow) return;
+
+    const holding = holdings.find((h) => h.id === panel.dataset.holdingId);
+    const mov = holding.movements.find((m) => m.id === movRow.dataset.movementId);
+    if (!mov) return;
+
+    if (e.target.classList.contains("mov-fecha")) mov.fecha = e.target.value;
+    else if (e.target.classList.contains("mov-kind")) mov.kind = e.target.value;
+    else if (e.target.classList.contains("mov-titulos")) mov.titulos = parseFloat(e.target.value) || 0;
+    else if (e.target.classList.contains("mov-precio")) mov.precioUnitario = parseFloat(e.target.value) || 0;
+
+    recomputeHolding(holding);
+    saveHoldings(holdings);
+    render();
   });
 }
 
@@ -179,6 +356,374 @@ function render() {
   renderDonut(rows);
 }
 
+// ---------- Evolución histórica y proyección ----------
+
+function fmtAxisDate(tsSeconds) {
+  return new Date(tsSeconds * 1000).toLocaleDateString("es-ES", { month: "short", year: "2-digit" });
+}
+
+function fmtTooltipDate(tsSeconds) {
+  return new Date(tsSeconds * 1000).toLocaleDateString("es-ES", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+function nearestPriceAtOrBefore(points, ts) {
+  let lo = 0;
+  let hi = points.length - 1;
+  let ans = null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (points[mid].t <= ts) {
+      ans = points[mid];
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return ans;
+}
+
+function quantityAtDate(movements, cutoffMs) {
+  const relevant = movements.filter((m) => new Date(m.fecha).getTime() <= cutoffMs);
+  return replayMovements(relevant).qty;
+}
+
+function buildAlignedSeries(holding, masterTs, historyBySymbol, fxPoints) {
+  const rec = historyBySymbol[holding.symbol];
+  if (!rec || !rec.points || !rec.points.length) return masterTs.map(() => null);
+  const currency = holding.currency || rec.currency || "EUR";
+  return masterTs.map((ts) => {
+    const pricePt = nearestPriceAtOrBefore(rec.points, ts);
+    if (!pricePt) return null;
+    const qty = quantityAtDate(holding.movements, ts * 1000);
+    if (qty <= 0.0001) return null;
+    const valueNative = qty * pricePt.close;
+    if (currency === "EUR") return valueNative;
+    const fxPt = fxPoints ? nearestPriceAtOrBefore(fxPoints, ts) : null;
+    if (!fxPt || !fxPt.close) return null;
+    return valueNative / fxPt.close;
+  });
+}
+
+function buildLinePath(xs, ys, xScale, yScale) {
+  let d = "";
+  let open = false;
+  for (let i = 0; i < xs.length; i++) {
+    if (ys[i] == null) {
+      open = false;
+      continue;
+    }
+    d += `${open ? "L" : "M"}${xScale(xs[i]).toFixed(1)},${yScale(ys[i]).toFixed(1)} `;
+    open = true;
+  }
+  return d.trim();
+}
+
+function buildAreaPath(xs, ys, xScale, yScale, baselineY) {
+  let d = "";
+  let seg = [];
+  const flush = () => {
+    if (seg.length >= 2) {
+      let path = `M${seg[0][0].toFixed(1)},${baselineY.toFixed(1)} `;
+      seg.forEach(([x, y]) => {
+        path += `L${x.toFixed(1)},${y.toFixed(1)} `;
+      });
+      path += `L${seg[seg.length - 1][0].toFixed(1)},${baselineY.toFixed(1)} Z`;
+      d += path + " ";
+    }
+    seg = [];
+  };
+  for (let i = 0; i < xs.length; i++) {
+    if (ys[i] == null) {
+      flush();
+      continue;
+    }
+    seg.push([xScale(xs[i]), yScale(ys[i])]);
+  }
+  flush();
+  return d.trim();
+}
+
+function renderLineChart({ svgEl, tooltipEl, legendEl, tableEl, xValues, series }) {
+  const svgNS = "http://www.w3.org/2000/svg";
+  const W = 640;
+  const H = 240;
+  const padLeft = 56;
+  const padRight = 16;
+  const padTop = 16;
+  const padBottom = 28;
+  const plotW = W - padLeft - padRight;
+  const plotH = H - padTop - padBottom;
+
+  svgEl.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svgEl.innerHTML = "";
+  if (legendEl) legendEl.innerHTML = "";
+  if (tableEl) tableEl.innerHTML = "";
+  if (tooltipEl) tooltipEl.hidden = true;
+
+  const hasData = xValues.length > 0 && series.some((s) => s.values.some((v) => v != null));
+  if (!hasData) {
+    const text = document.createElementNS(svgNS, "text");
+    text.setAttribute("x", String(W / 2));
+    text.setAttribute("y", String(H / 2));
+    text.setAttribute("text-anchor", "middle");
+    text.setAttribute("class", "chart-axis-label");
+    text.textContent = "Sin datos históricos todavía";
+    svgEl.appendChild(text);
+    return;
+  }
+
+  const dark = isDarkMode();
+  const xMin = xValues[0];
+  const xMax = xValues[xValues.length - 1];
+  let yMax = 0;
+  series.forEach((s) => s.values.forEach((v) => {
+    if (v != null && v > yMax) yMax = v;
+  }));
+  yMax = yMax <= 0 ? 1 : yMax * 1.12;
+
+  const xScale = (x) => padLeft + (xMax === xMin ? 0 : ((x - xMin) / (xMax - xMin)) * plotW);
+  const yScale = (y) => padTop + plotH - (y / yMax) * plotH;
+  const baselineY = yScale(0);
+
+  const g = document.createElementNS(svgNS, "g");
+
+  const steps = 4;
+  for (let i = 0; i <= steps; i++) {
+    const val = (yMax / steps) * i;
+    const y = yScale(val);
+    const line = document.createElementNS(svgNS, "line");
+    line.setAttribute("x1", String(padLeft));
+    line.setAttribute("x2", String(W - padRight));
+    line.setAttribute("y1", y.toFixed(1));
+    line.setAttribute("y2", y.toFixed(1));
+    line.setAttribute("class", "chart-gridline");
+    g.appendChild(line);
+
+    const label = document.createElementNS(svgNS, "text");
+    label.setAttribute("x", String(padLeft - 8));
+    label.setAttribute("y", (y + 3).toFixed(1));
+    label.setAttribute("text-anchor", "end");
+    label.setAttribute("class", "chart-axis-label");
+    label.textContent = val.toLocaleString("es-ES", { maximumFractionDigits: 0 });
+    g.appendChild(label);
+  }
+
+  const tickCount = Math.min(5, xValues.length);
+  for (let i = 0; i < tickCount; i++) {
+    const idx = Math.round((i / (tickCount - 1 || 1)) * (xValues.length - 1));
+    const x = xScale(xValues[idx]);
+    const label = document.createElementNS(svgNS, "text");
+    label.setAttribute("x", x.toFixed(1));
+    label.setAttribute("y", String(H - 8));
+    label.setAttribute("text-anchor", "middle");
+    label.setAttribute("class", "chart-axis-label");
+    label.textContent = fmtAxisDate(xValues[idx]);
+    g.appendChild(label);
+  }
+
+  series.forEach((s) => {
+    const color = dark ? s.color.dark : s.color.light;
+
+    if (s.area) {
+      const areaPath = buildAreaPath(xValues, s.values, xScale, yScale, baselineY);
+      if (areaPath) {
+        const path = document.createElementNS(svgNS, "path");
+        path.setAttribute("d", areaPath);
+        path.setAttribute("class", "chart-area");
+        path.setAttribute("fill", color);
+        g.appendChild(path);
+      }
+    }
+
+    const linePath = buildLinePath(xValues, s.values, xScale, yScale);
+    if (linePath) {
+      const path = document.createElementNS(svgNS, "path");
+      path.setAttribute("d", linePath);
+      path.setAttribute("class", "chart-line" + (s.dashed ? " dashed" : ""));
+      path.setAttribute("stroke", color);
+      if (s.opacity != null) path.setAttribute("opacity", String(s.opacity));
+      g.appendChild(path);
+    }
+
+    for (let i = s.values.length - 1; i >= 0; i--) {
+      if (s.values[i] != null) {
+        const cx = xScale(xValues[i]);
+        const cy = yScale(s.values[i]);
+        const dot = document.createElementNS(svgNS, "circle");
+        dot.setAttribute("cx", cx.toFixed(1));
+        dot.setAttribute("cy", cy.toFixed(1));
+        dot.setAttribute("r", "4");
+        dot.setAttribute("fill", color);
+        dot.setAttribute("class", "chart-end-dot");
+        g.appendChild(dot);
+
+        if (s.showEndLabel) {
+          const label = document.createElementNS(svgNS, "text");
+          const nearRight = cx + 6 > W - padRight - 40;
+          label.setAttribute("x", (nearRight ? cx - 6 : cx + 6).toFixed(1));
+          label.setAttribute("y", (cy - 8).toFixed(1));
+          label.setAttribute("text-anchor", nearRight ? "end" : "start");
+          label.setAttribute("class", "chart-end-label");
+          label.textContent = fmtMoney(s.values[i]);
+          g.appendChild(label);
+        }
+        break;
+      }
+    }
+
+    if (s.markers) {
+      s.markers.forEach((m) => {
+        const cx = xScale(m.x);
+        const cy = yScale(m.y);
+        const dot = document.createElementNS(svgNS, "circle");
+        dot.setAttribute("cx", cx.toFixed(1));
+        dot.setAttribute("cy", cy.toFixed(1));
+        dot.setAttribute("r", "4");
+        dot.setAttribute("fill", color);
+        dot.setAttribute("class", "chart-end-dot");
+        g.appendChild(dot);
+
+        const label = document.createElementNS(svgNS, "text");
+        const nearRight = cx + 6 > W - padRight - 60;
+        label.setAttribute("x", (nearRight ? cx - 6 : cx + 6).toFixed(1));
+        label.setAttribute("y", (cy - 8).toFixed(1));
+        label.setAttribute("text-anchor", nearRight ? "end" : "start");
+        label.setAttribute("class", "chart-end-label");
+        label.textContent = `${m.label}: ${fmtMoney(m.y)}`;
+        g.appendChild(label);
+      });
+    }
+  });
+
+  svgEl.appendChild(g);
+
+  const crosshair = document.createElementNS(svgNS, "line");
+  crosshair.setAttribute("y1", String(padTop));
+  crosshair.setAttribute("y2", String(H - padBottom));
+  crosshair.setAttribute("class", "chart-crosshair");
+  crosshair.setAttribute("visibility", "hidden");
+  svgEl.appendChild(crosshair);
+
+  const overlay = document.createElementNS(svgNS, "rect");
+  overlay.setAttribute("x", String(padLeft));
+  overlay.setAttribute("y", String(padTop));
+  overlay.setAttribute("width", String(plotW));
+  overlay.setAttribute("height", String(plotH));
+  overlay.setAttribute("class", "chart-hit-overlay");
+  svgEl.appendChild(overlay);
+
+  if (tooltipEl) {
+    const wrap = svgEl.parentElement;
+    const showTooltip = (evt) => {
+      const rect = svgEl.getBoundingClientRect();
+      const px = ((evt.clientX - rect.left) / rect.width) * W;
+      let closestIdx = 0;
+      let minDist = Infinity;
+      xValues.forEach((x, i) => {
+        const dist = Math.abs(xScale(x) - px);
+        if (dist < minDist) {
+          minDist = dist;
+          closestIdx = i;
+        }
+      });
+      const x = xValues[closestIdx];
+      crosshair.setAttribute("x1", xScale(x).toFixed(1));
+      crosshair.setAttribute("x2", xScale(x).toFixed(1));
+      crosshair.setAttribute("visibility", "visible");
+
+      tooltipEl.innerHTML = "";
+      const dateEl = document.createElement("div");
+      dateEl.className = "tt-date";
+      dateEl.textContent = fmtTooltipDate(x);
+      tooltipEl.appendChild(dateEl);
+
+      series.forEach((s) => {
+        const v = s.values[closestIdx];
+        if (v == null) return;
+        const color = dark ? s.color.dark : s.color.light;
+        const row = document.createElement("div");
+        row.className = "tt-row";
+        const key = document.createElement("span");
+        key.className = "tt-key";
+        key.style.background = color;
+        const name = document.createElement("span");
+        name.className = "tt-name";
+        name.textContent = s.name;
+        const value = document.createElement("span");
+        value.className = "tt-value";
+        value.textContent = fmtMoney(v);
+        row.appendChild(key);
+        row.appendChild(name);
+        row.appendChild(value);
+        tooltipEl.appendChild(row);
+      });
+
+      tooltipEl.hidden = false;
+      const wrapRect = wrap.getBoundingClientRect();
+      let left = evt.clientX - wrapRect.left + 12;
+      if (left + 160 > wrapRect.width) left = evt.clientX - wrapRect.left - 172;
+      tooltipEl.style.left = `${left}px`;
+      tooltipEl.style.top = `${Math.max(0, evt.clientY - wrapRect.top - 40)}px`;
+    };
+    overlay.addEventListener("pointermove", showTooltip);
+    overlay.addEventListener("pointerleave", () => {
+      tooltipEl.hidden = true;
+      crosshair.setAttribute("visibility", "hidden");
+    });
+  }
+
+  if (legendEl && series.length >= 2) {
+    series.forEach((s) => {
+      const color = dark ? s.color.dark : s.color.light;
+      const item = document.createElement("div");
+      item.className = "legend-item";
+      const swatch = document.createElement("span");
+      swatch.className = "legend-swatch";
+      swatch.style.background = color;
+      if (s.dashed) swatch.style.opacity = "0.6";
+      const label = document.createElement("span");
+      label.className = "legend-label";
+      label.textContent = s.name;
+      item.appendChild(swatch);
+      item.appendChild(label);
+      legendEl.appendChild(item);
+    });
+  }
+
+  if (tableEl) {
+    const table = document.createElement("table");
+    const thead = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    const thDate = document.createElement("th");
+    thDate.textContent = "Fecha";
+    headRow.appendChild(thDate);
+    series.forEach((s) => {
+      const th = document.createElement("th");
+      th.textContent = s.name;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement("tbody");
+    xValues.forEach((x, i) => {
+      if (series.every((s) => s.values[i] == null)) return;
+      const tr = document.createElement("tr");
+      const tdDate = document.createElement("td");
+      tdDate.textContent = fmtTooltipDate(x);
+      tr.appendChild(tdDate);
+      series.forEach((s) => {
+        const td = document.createElement("td");
+        td.textContent = s.values[i] == null ? "—" : fmtMoney(s.values[i]);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    tableEl.appendChild(table);
+  }
+}
+
 async function refreshPrices() {
   if (holdings.length === 0) return;
   const btn = document.getElementById("refresh-btn");
@@ -230,20 +775,287 @@ async function refreshPrices() {
   }
 }
 
+let lastPortfolioHistory = null;
+
+async function fetchHistory(symbols, range) {
+  const res = await fetch(`/api/history?symbols=${encodeURIComponent(symbols.join(","))}&range=${range}&interval=1wk`);
+  return res.json();
+}
+
+function renderHistoryCharts() {
+  const totalSvg = document.getElementById("chart-total");
+  const totalTooltip = document.getElementById("chart-total-tooltip");
+  const totalTable = document.getElementById("chart-total-table");
+  const assetsSvg = document.getElementById("chart-assets");
+  const assetsTooltip = document.getElementById("chart-assets-tooltip");
+  const assetsLegend = document.getElementById("chart-assets-legend");
+  const assetsTable = document.getElementById("chart-assets-table");
+
+  if (!lastPortfolioHistory) {
+    renderLineChart({ svgEl: totalSvg, tooltipEl: totalTooltip, tableEl: totalTable, xValues: [], series: [] });
+    renderLineChart({ svgEl: assetsSvg, tooltipEl: assetsTooltip, legendEl: assetsLegend, tableEl: assetsTable, xValues: [], series: [] });
+    renderProjectionChart();
+    return;
+  }
+
+  const { masterTs, totalValues, assetSeries } = lastPortfolioHistory;
+
+  renderLineChart({
+    svgEl: totalSvg,
+    tooltipEl: totalTooltip,
+    tableEl: totalTable,
+    xValues: masterTs,
+    series: [{ name: "Valor total", color: CATEGORICAL_HUES[0], values: totalValues, area: true, showEndLabel: true }],
+  });
+
+  const nonEmpty = assetSeries.filter((s) => s.values.some((v) => v != null));
+  const direct = nonEmpty.slice(0, 7);
+  const rest = nonEmpty.slice(7);
+  const series = direct.map((s, i) => ({
+    name: s.holding.symbol,
+    color: CATEGORICAL_HUES[i],
+    values: s.values,
+    showEndLabel: nonEmpty.length <= 4,
+  }));
+  if (rest.length) {
+    const otrosValues = masterTs.map((_, i) => {
+      let sum = 0;
+      let any = false;
+      rest.forEach(({ values }) => {
+        if (values[i] != null) {
+          sum += values[i];
+          any = true;
+        }
+      });
+      return any ? sum : null;
+    });
+    series.push({ name: "Otros", color: OTROS_COLOR, values: otrosValues });
+  }
+
+  renderLineChart({
+    svgEl: assetsSvg,
+    tooltipEl: assetsTooltip,
+    legendEl: assetsLegend,
+    tableEl: assetsTable,
+    xValues: masterTs,
+    series,
+  });
+
+  renderProjectionChart();
+}
+
+function renderProjectionChart() {
+  const svg = document.getElementById("chart-projection");
+  const tooltip = document.getElementById("chart-projection-tooltip");
+  const legend = document.getElementById("chart-projection-legend");
+  const table = document.getElementById("chart-projection-table");
+  const note = document.getElementById("projection-note");
+
+  if (!lastPortfolioHistory) {
+    renderLineChart({ svgEl: svg, tooltipEl: tooltip, legendEl: legend, tableEl: table, xValues: [], series: [] });
+    note.textContent = "Cargá el histórico de precios para ver la proyección.";
+    return;
+  }
+
+  const { masterTs, totalValues } = lastPortfolioHistory;
+  const firstIdx = totalValues.findIndex((v) => v != null);
+  let lastIdx = -1;
+  for (let i = totalValues.length - 1; i >= 0; i--) {
+    if (totalValues[i] != null) {
+      lastIdx = i;
+      break;
+    }
+  }
+
+  if (firstIdx === -1 || lastIdx === -1 || firstIdx === lastIdx) {
+    renderLineChart({
+      svgEl: svg,
+      tooltipEl: tooltip,
+      legendEl: legend,
+      tableEl: table,
+      xValues: masterTs,
+      series: [{ name: "Valor total", color: CATEGORICAL_HUES[0], values: totalValues, area: true }],
+    });
+    note.textContent = "No hay suficiente historial todavía para proyectar una tendencia.";
+    return;
+  }
+
+  const t0 = masterTs[firstIdx];
+  const v0 = totalValues[firstIdx];
+  const t1 = masterTs[lastIdx];
+  const v1 = totalValues[lastIdx];
+  const yearsSpan = (t1 - t0) / (365.25 * 24 * 3600);
+
+  if (yearsSpan < 0.4 || v0 <= 0 || v1 <= 0) {
+    renderLineChart({
+      svgEl: svg,
+      tooltipEl: tooltip,
+      legendEl: legend,
+      tableEl: table,
+      xValues: masterTs,
+      series: [{ name: "Valor total", color: CATEGORICAL_HUES[0], values: totalValues, area: true }],
+    });
+    note.textContent = "Se necesitan al menos ~6 meses de historial para calcular una proyección razonable.";
+    return;
+  }
+
+  const cagr = Math.pow(v1 / v0, 1 / yearsSpan) - 1;
+  const H = masterTs.length;
+  const futureTs = [];
+  const futureValues = [];
+  for (let m = 1; m <= 120; m++) {
+    futureTs.push(t1 + m * 30.44 * 24 * 3600);
+    futureValues.push(v1 * Math.pow(1 + cagr, m / 12));
+  }
+
+  const combinedTs = [...masterTs, ...futureTs];
+  const historicalAligned = [...totalValues, ...futureTs.map(() => null)];
+  const projectionAligned = [
+    ...Array(lastIdx).fill(null),
+    v1,
+    ...Array(H - lastIdx - 1).fill(null),
+    ...futureValues,
+  ];
+  const proj5 = futureValues[59];
+  const proj10 = futureValues[119];
+
+  renderLineChart({
+    svgEl: svg,
+    tooltipEl: tooltip,
+    legendEl: legend,
+    tableEl: table,
+    xValues: combinedTs,
+    series: [
+      { name: "Histórico", color: CATEGORICAL_HUES[0], values: historicalAligned, area: true },
+      {
+        name: "Proyección (estimada)",
+        color: CATEGORICAL_HUES[0],
+        values: projectionAligned,
+        dashed: true,
+        opacity: 0.7,
+        markers: [
+          { x: futureTs[59], y: proj5, label: "5 años" },
+          { x: futureTs[119], y: proj10, label: "10 años" },
+        ],
+      },
+    ],
+  });
+
+  note.textContent =
+    `Valor actual: ${fmtMoney(v1)}. Con el crecimiento anual compuesto de los últimos ${yearsSpan.toFixed(1)} años ` +
+    `(${(cagr * 100).toFixed(1)}% anual), la proyección simple da ${fmtMoney(proj5)} en 5 años y ${fmtMoney(proj10)} en 10 años. ` +
+    `Es una extrapolación lineal del histórico (incluye aportaciones pasadas, no solo rentabilidad) y no garantiza resultados futuros.`;
+}
+
+async function loadPortfolioHistory() {
+  const statusEl = document.getElementById("history-status");
+  const btn = document.getElementById("history-refresh-btn");
+
+  if (holdings.length === 0) {
+    statusEl.textContent = "Agregá posiciones para ver la evolución.";
+    lastPortfolioHistory = null;
+    renderHistoryCharts();
+    return;
+  }
+
+  const range = document.getElementById("history-range").value;
+  btn.disabled = true;
+  statusEl.textContent = "Cargando histórico…";
+
+  try {
+    const symbols = [...new Set(holdings.map((h) => h.symbol))];
+    const needsFx = holdings.some((h) => (h.currency || "USD") !== "EUR");
+    const fetchSymbols = needsFx ? [...symbols, "EURUSD=X"] : symbols;
+    const results = await fetchHistory(fetchSymbols, range);
+    const historyBySymbol = Object.fromEntries(results.map((r) => [r.symbol, r]));
+
+    const fxRec = historyBySymbol["EURUSD=X"];
+    const fxPoints = fxRec && fxRec.points.length ? fxRec.points : null;
+
+    let masterTs = [];
+    let maxLen = 0;
+    symbols.forEach((sym) => {
+      const rec = historyBySymbol[sym];
+      if (rec && !rec.error && rec.points.length > maxLen) {
+        maxLen = rec.points.length;
+        masterTs = rec.points.map((p) => p.t);
+      }
+    });
+
+    if (masterTs.length === 0) {
+      statusEl.textContent = "No se pudo cargar el histórico de precios.";
+      lastPortfolioHistory = null;
+      renderHistoryCharts();
+      return;
+    }
+
+    const assetSeries = holdings.map((h) => ({
+      holding: h,
+      values: buildAlignedSeries(h, masterTs, historyBySymbol, fxPoints),
+    }));
+
+    const totalValues = masterTs.map((_, i) => {
+      let sum = 0;
+      let any = false;
+      assetSeries.forEach(({ values }) => {
+        if (values[i] != null) {
+          sum += values[i];
+          any = true;
+        }
+      });
+      return any ? sum : null;
+    });
+
+    const firstValidIdx = totalValues.findIndex((v) => v != null);
+    const trimStart = firstValidIdx > 0 ? firstValidIdx : 0;
+
+    lastPortfolioHistory = {
+      masterTs: masterTs.slice(trimStart),
+      totalValues: totalValues.slice(trimStart),
+      assetSeries: assetSeries.map((s) => ({ holding: s.holding, values: s.values.slice(trimStart) })),
+    };
+
+    statusEl.textContent = "Actualizado: " + new Date().toLocaleTimeString("es-ES");
+  } catch (err) {
+    statusEl.textContent = "Error al cargar el histórico.";
+    lastPortfolioHistory = null;
+  } finally {
+    btn.disabled = false;
+    renderHistoryCharts();
+  }
+}
+
+document.getElementById("history-refresh-btn").addEventListener("click", loadPortfolioHistory);
+document.getElementById("history-range").addEventListener("change", loadPortfolioHistory);
+
 document.getElementById("add-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const form = e.target;
   const symbol = form.symbol.value.trim().toUpperCase();
   if (!symbol) return;
 
+  const quantity = parseFloat(form.quantity.value);
+  const buyPrice = parseFloat(form.buyPrice.value);
+  const currency = form.currency.value;
+
   holdings.push({
     id: crypto.randomUUID(),
     symbol,
     type: form.type.value,
-    quantity: parseFloat(form.quantity.value),
-    avgCostNative: parseFloat(form.buyPrice.value),
-    currency: form.currency.value,
+    quantity,
+    avgCostNative: buyPrice,
+    currency,
     lastPrice: null,
+    movements: [
+      {
+        id: crypto.randomUUID(),
+        fecha: new Date().toISOString().slice(0, 10),
+        kind: "compra",
+        titulos: quantity,
+        precioUnitario: buyPrice,
+        divisa: currency,
+      },
+    ],
   });
   saveHoldings(holdings);
   form.reset();
@@ -291,6 +1103,16 @@ function parseMovementsCsv(text) {
   return rows;
 }
 
+function classifyMovementKind(row) {
+  if (row.operacion === "compra") return "compra";
+  if (row.operacion === "suscripcion") return "suscripcion";
+  if (row.operacion === "venta") return "venta";
+  if (row.operacion === "reembolso") return "reembolso";
+  if (row.titulos > 0) return "transferencia_entrada";
+  if (row.titulos < 0) return "transferencia_salida";
+  return null;
+}
+
 function consolidatePositions(rows) {
   const state = new Map();
 
@@ -303,28 +1125,27 @@ function consolidatePositions(rows) {
         name: row.valor,
         type: TIPO_ACTIVO_MAP[row.tipoActivo] || "Acción",
         currency: row.divisa,
-        qty: 0,
-        costNative: 0,
+        movements: [],
       });
     }
     const pos = state.get(row.isin);
-    const isEntry = row.operacion === "compra" || row.operacion === "suscripcion";
-    const isExit = row.operacion === "venta" || row.operacion === "reembolso";
+    const kind = classifyMovementKind(row);
+    if (!kind) continue; // operación no reconocida, se ignora
 
-    if (isEntry) {
-      pos.qty += row.titulos;
-      pos.costNative += row.titulos * row.precioUnitario;
-    } else if (isExit) {
-      if (pos.qty > 0) {
-        const avgNative = pos.costNative / pos.qty;
-        const removeQty = Math.min(row.titulos, pos.qty);
-        pos.costNative -= avgNative * removeQty;
-        pos.qty -= removeQty;
-      }
-    }
+    pos.movements.push({
+      id: crypto.randomUUID(),
+      fecha: row.fecha.toISOString().slice(0, 10),
+      kind,
+      titulos: Math.abs(row.titulos),
+      precioUnitario: row.precioUnitario,
+      divisa: row.divisa,
+    });
   }
 
-  return [...state.values()];
+  return [...state.values()].map((pos) => {
+    const { qty, costNative } = replayMovements(pos.movements);
+    return { ...pos, qty, costNative };
+  });
 }
 
 async function resolveIsins(isins) {
@@ -384,6 +1205,7 @@ document.getElementById("csv-import-btn").addEventListener("click", async () => 
       avgCostNative: pos.costNative / pos.qty,
       lastPrice: null,
       quoteError: null,
+      movements: pos.movements,
     };
 
     if (existing) {
@@ -409,7 +1231,11 @@ document.getElementById("csv-import-btn").addEventListener("click", async () => 
 
   render();
   refreshPrices();
+  loadPortfolioHistory();
 });
 
+initHoldingsTableEvents();
 render();
 refreshPrices();
+renderHistoryCharts();
+loadPortfolioHistory();

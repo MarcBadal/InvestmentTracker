@@ -16,6 +16,10 @@ PORT = 8765
 PUBLIC_DIR = Path(__file__).parent / "public"
 QUOTE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=1"
+HISTORY_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={range}&interval={interval}"
+
+ALLOWED_RANGES = {"6mo", "1y", "2y", "5y", "10y", "max"}
+ALLOWED_INTERVALS = {"1d", "1wk", "1mo"}
 
 _resolve_cache: dict[str, dict] = {}
 
@@ -36,6 +40,27 @@ def fetch_quote(symbol: str) -> dict:
         }
     except Exception as exc:  # noqa: BLE001 - queremos reportar cualquier fallo al front
         return {"symbol": symbol, "price": None, "currency": None, "name": symbol, "error": str(exc)}
+
+
+def fetch_history(args: tuple[str, str, str]) -> dict:
+    symbol, range_, interval = args
+    url = HISTORY_URL.format(symbol=urllib.parse.quote(symbol), range=range_, interval=interval)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        result = data["chart"]["result"][0]
+        timestamps = result.get("timestamp") or []
+        closes = result["indicators"]["quote"][0].get("close") or []
+        meta = result["meta"]
+        points = [
+            {"t": ts, "close": close}
+            for ts, close in zip(timestamps, closes)
+            if close is not None
+        ]
+        return {"symbol": symbol, "currency": meta.get("currency"), "points": points, "error": None}
+    except Exception as exc:  # noqa: BLE001
+        return {"symbol": symbol, "currency": None, "points": [], "error": str(exc)}
 
 
 def resolve_isin(isin: str) -> dict:
@@ -78,6 +103,24 @@ class Handler(BaseHTTPRequestHandler):
                 return
             with ThreadPoolExecutor(max_workers=min(8, len(symbols))) as pool:
                 results = list(pool.map(fetch_quote, symbols))
+            self._send_json(200, results)
+            return
+
+        if parsed.path == "/api/history":
+            qs = parse_qs(parsed.query)
+            symbols = [s.strip().upper() for s in qs.get("symbols", [""])[0].split(",") if s.strip()]
+            range_ = qs.get("range", ["2y"])[0]
+            interval = qs.get("interval", ["1wk"])[0]
+            if range_ not in ALLOWED_RANGES:
+                range_ = "2y"
+            if interval not in ALLOWED_INTERVALS:
+                interval = "1wk"
+            if not symbols:
+                self._send_json(400, {"error": "falta el parametro symbols"})
+                return
+            args = [(s, range_, interval) for s in symbols]
+            with ThreadPoolExecutor(max_workers=min(8, len(args))) as pool:
+                results = list(pool.map(fetch_history, args))
             self._send_json(200, results)
             return
 
