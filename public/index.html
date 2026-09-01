@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tracker de Inversiones</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Tracker de Inversiones</h1>
+  <p>Acciones, ETFs y fondos &mdash; datos guardados localmente en este navegador</p>
+</header>
+<main>
+  <section class="tiles" id="tiles">
+    <div class="tile">
+      <div class="label">Total invertido (EUR)</div>
+      <div class="value" id="tile-invested">&mdash;</div>
+    </div>
+    <div class="tile">
+      <div class="label">Valor actual (EUR)</div>
+      <div class="value" id="tile-current">&mdash;</div>
+    </div>
+    <div class="tile">
+      <div class="label">Ganancia / P&eacute;rdida</div>
+      <div class="value" id="tile-gain">&mdash;</div>
+    </div>
+    <div class="tile">
+      <div class="label">Rendimiento</div>
+      <div class="value" id="tile-pct">&mdash;</div>
+    </div>
+  </section>
+
+  <div class="layout">
+    <div class="card">
+      <div class="toolbar">
+        <span id="last-updated">Sin actualizar todav&iacute;a</span>
+        <button id="refresh-btn">Actualizar precios</button>
+      </div>
+      <h2>Mis posiciones</h2>
+      <form class="add-holding" id="add-form">
+        <div>
+          <label for="f-symbol">S&iacute;mbolo</label>
+          <input id="f-symbol" name="symbol" placeholder="AAPL" required autocomplete="off">
+        </div>
+        <div>
+          <label for="f-type">Tipo</label>
+          <select id="f-type" name="type">
+            <option value="Acción">Acci&oacute;n</option>
+            <option value="ETF">ETF</option>
+            <option value="Fondo">Fondo</option>
+          </select>
+        </div>
+        <div>
+          <label for="f-qty">Cantidad</label>
+          <input id="f-qty" name="quantity" type="number" step="any" min="0" placeholder="10" required>
+        </div>
+        <div>
+          <label for="f-price">Precio de compra</label>
+          <input id="f-price" name="buyPrice" type="number" step="any" min="0" placeholder="150.00" required>
+        </div>
+        <div>
+          <label for="f-currency">Moneda</label>
+          <select id="f-currency" name="currency">
+            <option value="EUR">EUR</option>
+            <option value="USD">USD</option>
+          </select>
+        </div>
+        <button type="submit">Agregar</button>
+      </form>
+
+      <details class="import-panel" id="import-panel">
+        <summary>Importar movimientos desde CSV</summary>
+        <p class="import-hint">Archivo con columnas separadas por <code>;</code>: fecha, isin, valor, tipo_activo, mercado, divisa, operacion, titulos, precio_unitario, comision_divisa, tipo_cambio_eur, importe_neto_eur, titulos_netos, flujo_eur, dinero_nuevo, contrapartida, nota. Se consolidan compras/ventas y suscripciones/reembolsos por ISIN y se resuelve el ticker autom&aacute;ticamente.</p>
+        <input type="file" id="csv-file" accept=".csv,text/csv">
+        <button type="button" id="csv-import-btn">Procesar archivo</button>
+        <pre class="import-log" id="import-log"></pre>
+      </details>
+
+      <table id="holdings-table">
+        <thead>
+          <tr>
+            <th>S&iacute;mbolo</th>
+            <th>Tipo</th>
+            <th>Cantidad</th>
+            <th>Precio compra</th>
+            <th>Costo (EUR)</th>
+            <th>Precio actual</th>
+            <th>Valor actual (EUR)</th>
+            <th>Ganancia/P&eacute;rdida (EUR)</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="holdings-body"></tbody>
+      </table>
+      <div class="empty-state" id="empty-state" hidden>A&uacute;n no agregaste posiciones. Us&aacute; el formulario de arriba.</div>
+    </div>
+
+    <div class="card">
+      <h2>Distribuci&oacute;n por tipo de activo</h2>
+      <div class="chart-wrap">
+        <svg id="donut" viewBox="0 0 200 200" width="200" height="200" role="img" aria-label="Distribuci&oacute;n del portafolio por tipo de activo"></svg>
+        <div class="legend" id="legend"></div>
+      </div>
+    </div>
+  </div>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
