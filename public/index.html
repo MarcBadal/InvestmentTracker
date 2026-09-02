@@ -12,6 +12,12 @@
   <p>Acciones, ETFs y fondos &mdash; datos guardados localmente en este navegador</p>
 </header>
 <main>
+  <div class="tabs" role="tablist">
+    <button type="button" class="tab-btn active" id="tab-btn-cartera" data-tab="cartera" role="tab" aria-selected="true">Cartera</button>
+    <button type="button" class="tab-btn" id="tab-btn-proyeccion" data-tab="proyeccion" role="tab" aria-selected="false">Proyecci&oacute;n</button>
+  </div>
+
+  <div class="tab-panel" id="tab-cartera" role="tabpanel">
   <section class="tiles" id="tiles">
     <div class="tile">
       <div class="label">Total invertido (EUR)</div>
@@ -117,38 +123,53 @@
     <span id="history-status"></span>
   </div>
 
-  <div class="layout">
-    <div class="card">
-      <h2>Evoluci&oacute;n de la cartera</h2>
-      <div class="chart-block">
-        <h3>Valor total</h3>
-        <div class="line-chart-wrap" id="chart-total-wrap">
-          <svg id="chart-total" viewBox="0 0 640 240" role="img" aria-label="Evoluci&oacute;n del valor total de la cartera"></svg>
-          <div class="chart-tooltip" id="chart-total-tooltip" hidden></div>
-        </div>
-        <details class="table-view">
-          <summary>Ver como tabla</summary>
-          <div id="chart-total-table"></div>
-        </details>
+  <div class="card">
+    <h2>Evoluci&oacute;n de la cartera</h2>
+    <div class="chart-block">
+      <h3>Valor total</h3>
+      <div class="line-chart-wrap" id="chart-total-wrap">
+        <svg id="chart-total" viewBox="0 0 640 240" role="img" aria-label="Evoluci&oacute;n del valor total de la cartera"></svg>
+        <div class="chart-tooltip" id="chart-total-tooltip" hidden></div>
       </div>
-      <div class="chart-block">
-        <h3>Por activo</h3>
-        <div class="line-chart-wrap" id="chart-assets-wrap">
-          <svg id="chart-assets" viewBox="0 0 640 240" role="img" aria-label="Evoluci&oacute;n del valor de cada activo"></svg>
-          <div class="chart-tooltip" id="chart-assets-tooltip" hidden></div>
-        </div>
-        <div class="legend" id="chart-assets-legend"></div>
-        <details class="table-view">
-          <summary>Ver como tabla</summary>
-          <div id="chart-assets-table"></div>
-        </details>
-      </div>
+      <details class="table-view">
+        <summary>Ver como tabla</summary>
+        <div id="chart-total-table"></div>
+      </details>
     </div>
+    <div class="chart-block">
+      <h3>Por activo</h3>
+      <p class="chart-hint">Cada activo con su propia escala &mdash; hac&eacute;s clic en uno para verlo en grande.</p>
+      <div class="small-multiples" id="chart-assets-grid"></div>
+      <details class="table-view">
+        <summary>Ver como tabla</summary>
+        <div id="chart-assets-table"></div>
+      </details>
+    </div>
+  </div>
+  </div>
 
+  <div class="chart-modal-overlay" id="asset-modal-overlay" hidden>
+    <div class="chart-modal" role="dialog" aria-modal="true" aria-labelledby="asset-modal-title">
+      <div class="chart-modal-header">
+        <h3 id="asset-modal-title"></h3>
+        <button type="button" class="chart-modal-close" id="asset-modal-close" aria-label="Cerrar">&times;</button>
+      </div>
+      <div class="line-chart-wrap line-chart-wrap-lg" id="asset-modal-chart-wrap">
+        <svg id="chart-asset-detail" viewBox="0 0 960 420" role="img"></svg>
+        <div class="chart-tooltip" id="chart-asset-detail-tooltip" hidden></div>
+      </div>
+      <details class="table-view">
+        <summary>Ver como tabla</summary>
+        <div id="chart-asset-detail-table"></div>
+      </details>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="tab-proyeccion" role="tabpanel" hidden>
     <div class="card">
       <h2>Proyecci&oacute;n a 5-10 a&ntilde;os</h2>
-      <div class="line-chart-wrap" id="chart-projection-wrap">
-        <svg id="chart-projection" viewBox="0 0 640 240" role="img" aria-label="Proyecci&oacute;n del valor de la cartera a 5 y 10 a&ntilde;os"></svg>
+      <div class="line-chart-wrap line-chart-wrap-lg" id="chart-projection-wrap">
+        <svg id="chart-projection" viewBox="0 0 960 420" role="img" aria-label="Proyecci&oacute;n del valor de la cartera a 5 y 10 a&ntilde;os"></svg>
         <div class="chart-tooltip" id="chart-projection-tooltip" hidden></div>
       </div>
       <div class="legend" id="chart-projection-legend"></div>

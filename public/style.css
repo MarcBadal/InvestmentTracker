@@ -61,6 +61,29 @@ main {
   margin: 0 auto;
 }
 
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+}
+.tab-btn {
+  padding: 10px 16px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.tab-btn:hover { color: var(--text-primary); }
+.tab-btn.active {
+  color: var(--text-primary);
+  font-weight: 600;
+  border-bottom-color: var(--series-1);
+}
+
 .tiles {
   display: grid;
   grid-template-columns: repeat(4, minmax(180px, 1fr));
@@ -205,6 +228,27 @@ th {
   letter-spacing: 0.02em;
 }
 td.symbol { font-weight: 600; }
+.edit-symbol {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 0 2px;
+  vertical-align: middle;
+}
+.edit-symbol:hover { color: var(--series-1); }
+.edit-symbol-input {
+  width: 90px;
+  padding: 3px 6px;
+  border: 1px solid var(--series-1);
+  border-radius: 4px;
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
 td.gain { }
 td.gain.good { color: var(--success-text); }
 td.gain.bad { color: var(--critical-text); }
@@ -364,6 +408,9 @@ td.remove button:hover { color: var(--critical-text); }
   display: block;
   overflow: visible;
 }
+.line-chart-wrap-lg svg {
+  max-height: 70vh;
+}
 
 .chart-axis-label {
   fill: var(--text-muted);
@@ -455,6 +502,103 @@ td.remove button:hover { color: var(--critical-text); }
   margin-top: 8px;
   font-size: 0.78rem;
 }
+
+.chart-hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin: -4px 0 12px;
+}
+
+.small-multiples {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 12px;
+}
+.mini-chart-card {
+  display: block;
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  background: var(--page-plane);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px 6px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s ease;
+}
+.mini-chart-card:hover,
+.mini-chart-card:focus-visible {
+  border-color: var(--series-1);
+  outline: none;
+}
+.mini-chart-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.mini-chart-symbol {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+}
+.mini-chart-value {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.mini-chart-card svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  overflow: visible;
+}
+
+.chart-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 20;
+}
+.chart-modal-overlay:not([hidden]) {
+  display: flex;
+}
+.chart-modal {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 24px;
+  width: min(1000px, 100%);
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+}
+.chart-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.chart-modal-header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+.chart-modal-close {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 8px;
+}
+.chart-modal-close:hover { color: var(--critical-text); }
 
 .projection-note {
   font-size: 0.78rem;

@@ -52,7 +52,6 @@ const CATEGORICAL_HUES = [
   { light: "#4a3aa7", dark: "#9085e9" },
   { light: "#e34948", dark: "#e66767" },
 ];
-const OTROS_COLOR = { light: "#898781", dark: "#898781" };
 
 function recomputeHolding(h) {
   const { qty, costNative } = replayMovements(h.movements);
@@ -109,6 +108,8 @@ function isDarkMode() {
 let holdings = loadHoldings();
 let fxRate = null; // USD por 1 EUR (par EURUSD=X)
 const expandedIds = new Set();
+let editingSymbolId = null;
+let cancelingSymbolEdit = false;
 
 function toEUR(amountNative, currency) {
   if (currency === "EUR" || amountNative == null) return amountNative;
@@ -192,8 +193,12 @@ function renderTable(rows) {
     const tr = document.createElement("tr");
     tr.className = "holding-row";
     const warn = r.quoteError ? ` title="No se pudo actualizar el precio: ${r.quoteError}"` : "";
+    const symbolField =
+      editingSymbolId === r.id
+        ? `<input type="text" class="edit-symbol-input" data-id="${r.id}" value="${r.symbol}" autocomplete="off">`
+        : `${r.symbol}${r.quoteError ? " ⚠" : ""} <button class="edit-symbol" type="button" data-id="${r.id}" title="Editar s&iacute;mbolo">&#9998;</button>`;
     tr.innerHTML = `
-      <td class="symbol"${warn}><button class="toggle-movements" type="button" data-id="${r.id}">${expanded ? "▾" : "▸"}</button> ${r.symbol}${r.quoteError ? " ⚠" : ""}</td>
+      <td class="symbol"${warn}><button class="toggle-movements" type="button" data-id="${r.id}">${expanded ? "▾" : "▸"}</button> ${symbolField}</td>
       <td>${r.type}</td>
       <td>${r.quantity}</td>
       <td>${fmtMoney(r.avgCostNative, r.currency)}</td>
@@ -214,6 +219,14 @@ function renderTable(rows) {
     movTr.appendChild(td);
     body.appendChild(movTr);
   });
+
+  if (editingSymbolId) {
+    const input = body.querySelector(`.edit-symbol-input[data-id="${editingSymbolId}"]`);
+    if (input) {
+      input.focus();
+      input.select();
+    }
+  }
 }
 
 function initHoldingsTableEvents() {
@@ -234,6 +247,13 @@ function initHoldingsTableEvents() {
       holdings = holdings.filter((h) => h.id !== delHoldingBtn.dataset.id);
       expandedIds.delete(delHoldingBtn.dataset.id);
       saveHoldings(holdings);
+      render();
+      return;
+    }
+
+    const editSymbolBtn = e.target.closest(".edit-symbol");
+    if (editSymbolBtn) {
+      editingSymbolId = editSymbolBtn.dataset.id;
       render();
       return;
     }
@@ -286,6 +306,50 @@ function initHoldingsTableEvents() {
     recomputeHolding(holding);
     saveHoldings(holdings);
     render();
+  });
+
+  function commitSymbolEdit(input) {
+    const id = input.dataset.id;
+    const holding = holdings.find((h) => h.id === id);
+    editingSymbolId = null;
+    if (!holding) {
+      render();
+      return;
+    }
+    const newSymbol = input.value.trim().toUpperCase();
+    if (newSymbol && newSymbol !== holding.symbol) {
+      holding.symbol = newSymbol;
+      holding.lastPrice = null;
+      holding.quoteError = null;
+      saveHoldings(holdings);
+      render();
+      refreshPrices();
+      loadPortfolioHistory();
+      return;
+    }
+    render();
+  }
+
+  body.addEventListener(
+    "focusout",
+    (e) => {
+      if (!e.target.classList.contains("edit-symbol-input")) return;
+      if (cancelingSymbolEdit) return;
+      commitSymbolEdit(e.target);
+    },
+    true
+  );
+
+  body.addEventListener("keydown", (e) => {
+    if (!e.target.classList.contains("edit-symbol-input")) return;
+    if (e.key === "Enter") {
+      e.target.blur();
+    } else if (e.key === "Escape") {
+      cancelingSymbolEdit = true;
+      editingSymbolId = null;
+      render();
+      cancelingSymbolEdit = false;
+    }
   });
 }
 
@@ -443,14 +507,14 @@ function buildAreaPath(xs, ys, xScale, yScale, baselineY) {
   return d.trim();
 }
 
-function renderLineChart({ svgEl, tooltipEl, legendEl, tableEl, xValues, series }) {
+function renderLineChart({ svgEl, tooltipEl, legendEl, tableEl, xValues, series, width, height, compact }) {
   const svgNS = "http://www.w3.org/2000/svg";
-  const W = 640;
-  const H = 240;
-  const padLeft = 56;
-  const padRight = 16;
-  const padTop = 16;
-  const padBottom = 28;
+  const W = width || 640;
+  const H = height || (compact ? 130 : 240);
+  const padLeft = compact ? 8 : 56;
+  const padRight = compact ? 8 : 16;
+  const padTop = compact ? 8 : 16;
+  const padBottom = compact ? 8 : 28;
   const plotW = W - padLeft - padRight;
   const plotH = H - padTop - padBottom;
 
@@ -487,38 +551,48 @@ function renderLineChart({ svgEl, tooltipEl, legendEl, tableEl, xValues, series 
 
   const g = document.createElementNS(svgNS, "g");
 
-  const steps = 4;
-  for (let i = 0; i <= steps; i++) {
-    const val = (yMax / steps) * i;
-    const y = yScale(val);
+  if (compact) {
     const line = document.createElementNS(svgNS, "line");
     line.setAttribute("x1", String(padLeft));
     line.setAttribute("x2", String(W - padRight));
-    line.setAttribute("y1", y.toFixed(1));
-    line.setAttribute("y2", y.toFixed(1));
+    line.setAttribute("y1", baselineY.toFixed(1));
+    line.setAttribute("y2", baselineY.toFixed(1));
     line.setAttribute("class", "chart-gridline");
     g.appendChild(line);
+  } else {
+    const steps = 4;
+    for (let i = 0; i <= steps; i++) {
+      const val = (yMax / steps) * i;
+      const y = yScale(val);
+      const line = document.createElementNS(svgNS, "line");
+      line.setAttribute("x1", String(padLeft));
+      line.setAttribute("x2", String(W - padRight));
+      line.setAttribute("y1", y.toFixed(1));
+      line.setAttribute("y2", y.toFixed(1));
+      line.setAttribute("class", "chart-gridline");
+      g.appendChild(line);
 
-    const label = document.createElementNS(svgNS, "text");
-    label.setAttribute("x", String(padLeft - 8));
-    label.setAttribute("y", (y + 3).toFixed(1));
-    label.setAttribute("text-anchor", "end");
-    label.setAttribute("class", "chart-axis-label");
-    label.textContent = val.toLocaleString("es-ES", { maximumFractionDigits: 0 });
-    g.appendChild(label);
-  }
+      const label = document.createElementNS(svgNS, "text");
+      label.setAttribute("x", String(padLeft - 8));
+      label.setAttribute("y", (y + 3).toFixed(1));
+      label.setAttribute("text-anchor", "end");
+      label.setAttribute("class", "chart-axis-label");
+      label.textContent = val.toLocaleString("es-ES", { maximumFractionDigits: 0 });
+      g.appendChild(label);
+    }
 
-  const tickCount = Math.min(5, xValues.length);
-  for (let i = 0; i < tickCount; i++) {
-    const idx = Math.round((i / (tickCount - 1 || 1)) * (xValues.length - 1));
-    const x = xScale(xValues[idx]);
-    const label = document.createElementNS(svgNS, "text");
-    label.setAttribute("x", x.toFixed(1));
-    label.setAttribute("y", String(H - 8));
-    label.setAttribute("text-anchor", "middle");
-    label.setAttribute("class", "chart-axis-label");
-    label.textContent = fmtAxisDate(xValues[idx]);
-    g.appendChild(label);
+    const tickCount = Math.min(5, xValues.length);
+    for (let i = 0; i < tickCount; i++) {
+      const idx = Math.round((i / (tickCount - 1 || 1)) * (xValues.length - 1));
+      const x = xScale(xValues[idx]);
+      const label = document.createElementNS(svgNS, "text");
+      label.setAttribute("x", x.toFixed(1));
+      label.setAttribute("y", String(H - 8));
+      label.setAttribute("text-anchor", "middle");
+      label.setAttribute("class", "chart-axis-label");
+      label.textContent = fmtAxisDate(xValues[idx]);
+      g.appendChild(label);
+    }
   }
 
   series.forEach((s) => {
@@ -552,12 +626,12 @@ function renderLineChart({ svgEl, tooltipEl, legendEl, tableEl, xValues, series 
         const dot = document.createElementNS(svgNS, "circle");
         dot.setAttribute("cx", cx.toFixed(1));
         dot.setAttribute("cy", cy.toFixed(1));
-        dot.setAttribute("r", "4");
+        dot.setAttribute("r", compact ? "3" : "4");
         dot.setAttribute("fill", color);
         dot.setAttribute("class", "chart-end-dot");
         g.appendChild(dot);
 
-        if (s.showEndLabel) {
+        if (s.showEndLabel && !compact) {
           const label = document.createElementNS(svgNS, "text");
           const nearRight = cx + 6 > W - padRight - 40;
           label.setAttribute("x", (nearRight ? cx - 6 : cx + 6).toFixed(1));
@@ -596,6 +670,8 @@ function renderLineChart({ svgEl, tooltipEl, legendEl, tableEl, xValues, series 
   });
 
   svgEl.appendChild(g);
+
+  if (compact) return;
 
   const crosshair = document.createElementNS(svgNS, "line");
   crosshair.setAttribute("y1", String(padTop));
@@ -691,7 +767,12 @@ function renderLineChart({ svgEl, tooltipEl, legendEl, tableEl, xValues, series 
   }
 
   if (tableEl) {
-    const table = document.createElement("table");
+    buildDataTable(tableEl, xValues, series);
+  }
+}
+
+function buildDataTable(tableEl, xValues, series) {
+  const table = document.createElement("table");
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
     const thDate = document.createElement("th");
@@ -721,7 +802,6 @@ function renderLineChart({ svgEl, tooltipEl, legendEl, tableEl, xValues, series 
     });
     table.appendChild(tbody);
     tableEl.appendChild(table);
-  }
 }
 
 async function refreshPrices() {
@@ -786,14 +866,15 @@ function renderHistoryCharts() {
   const totalSvg = document.getElementById("chart-total");
   const totalTooltip = document.getElementById("chart-total-tooltip");
   const totalTable = document.getElementById("chart-total-table");
-  const assetsSvg = document.getElementById("chart-assets");
-  const assetsTooltip = document.getElementById("chart-assets-tooltip");
-  const assetsLegend = document.getElementById("chart-assets-legend");
+  const assetsGrid = document.getElementById("chart-assets-grid");
   const assetsTable = document.getElementById("chart-assets-table");
+
+  closeAssetDetail();
 
   if (!lastPortfolioHistory) {
     renderLineChart({ svgEl: totalSvg, tooltipEl: totalTooltip, tableEl: totalTable, xValues: [], series: [] });
-    renderLineChart({ svgEl: assetsSvg, tooltipEl: assetsTooltip, legendEl: assetsLegend, tableEl: assetsTable, xValues: [], series: [] });
+    assetsGrid.innerHTML = "";
+    assetsTable.innerHTML = "";
     renderProjectionChart();
     return;
   }
@@ -809,39 +890,87 @@ function renderHistoryCharts() {
   });
 
   const nonEmpty = assetSeries.filter((s) => s.values.some((v) => v != null));
-  const direct = nonEmpty.slice(0, 7);
-  const rest = nonEmpty.slice(7);
-  const series = direct.map((s, i) => ({
+  const tileSeries = nonEmpty.map((s, i) => ({
     name: s.holding.symbol,
-    color: CATEGORICAL_HUES[i],
+    color: CATEGORICAL_HUES[i % CATEGORICAL_HUES.length],
     values: s.values,
-    showEndLabel: nonEmpty.length <= 4,
+    area: true,
   }));
-  if (rest.length) {
-    const otrosValues = masterTs.map((_, i) => {
-      let sum = 0;
-      let any = false;
-      rest.forEach(({ values }) => {
-        if (values[i] != null) {
-          sum += values[i];
-          any = true;
-        }
-      });
-      return any ? sum : null;
-    });
-    series.push({ name: "Otros", color: OTROS_COLOR, values: otrosValues });
-  }
 
-  renderLineChart({
-    svgEl: assetsSvg,
-    tooltipEl: assetsTooltip,
-    legendEl: assetsLegend,
-    tableEl: assetsTable,
-    xValues: masterTs,
-    series,
-  });
+  renderAssetGrid(assetsGrid, masterTs, tileSeries);
+  buildDataTable(assetsTable, masterTs, tileSeries);
 
   renderProjectionChart();
+}
+
+function renderAssetGrid(gridEl, masterTs, tileSeries) {
+  gridEl.innerHTML = "";
+  if (!tileSeries.length) {
+    gridEl.innerHTML = `<p class="chart-hint">Sin datos históricos todavía.</p>`;
+    return;
+  }
+
+  tileSeries.forEach((s) => {
+    const lastValue = [...s.values].reverse().find((v) => v != null);
+
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "mini-chart-card";
+    card.innerHTML = `
+      <div class="mini-chart-header">
+        <span class="mini-chart-symbol">${s.name}</span>
+        <span class="mini-chart-value">${lastValue != null ? fmtMoney(lastValue) : "—"}</span>
+      </div>
+      <svg viewBox="0 0 260 90" role="img" aria-label="Evolución de ${s.name}"></svg>
+    `;
+    const svg = card.querySelector("svg");
+    renderLineChart({
+      svgEl: svg,
+      xValues: masterTs,
+      series: [s],
+      width: 260,
+      height: 90,
+      compact: true,
+    });
+    card.addEventListener("click", () => openAssetDetail(s.name, masterTs, s));
+    gridEl.appendChild(card);
+  });
+}
+
+function openAssetDetail(name, xValues, s) {
+  const overlay = document.getElementById("asset-modal-overlay");
+  const title = document.getElementById("asset-modal-title");
+  const svg = document.getElementById("chart-asset-detail");
+  const tooltip = document.getElementById("chart-asset-detail-tooltip");
+  const table = document.getElementById("chart-asset-detail-table");
+
+  title.textContent = name;
+  renderLineChart({
+    svgEl: svg,
+    tooltipEl: tooltip,
+    tableEl: table,
+    xValues,
+    series: [{ ...s, showEndLabel: true }],
+    width: 960,
+    height: 420,
+  });
+  overlay.hidden = false;
+}
+
+function closeAssetDetail() {
+  const overlay = document.getElementById("asset-modal-overlay");
+  if (overlay) overlay.hidden = true;
+}
+
+function initAssetDetailModal() {
+  const overlay = document.getElementById("asset-modal-overlay");
+  document.getElementById("asset-modal-close").addEventListener("click", closeAssetDetail);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) closeAssetDetail();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !overlay.hidden) closeAssetDetail();
+  });
 }
 
 function renderProjectionChart() {
@@ -851,8 +980,11 @@ function renderProjectionChart() {
   const table = document.getElementById("chart-projection-table");
   const note = document.getElementById("projection-note");
 
+  const PROJ_W = 960;
+  const PROJ_H = 420;
+
   if (!lastPortfolioHistory) {
-    renderLineChart({ svgEl: svg, tooltipEl: tooltip, legendEl: legend, tableEl: table, xValues: [], series: [] });
+    renderLineChart({ svgEl: svg, tooltipEl: tooltip, legendEl: legend, tableEl: table, xValues: [], series: [], width: PROJ_W, height: PROJ_H });
     note.textContent = "Cargá el histórico de precios para ver la proyección.";
     return;
   }
@@ -875,6 +1007,8 @@ function renderProjectionChart() {
       tableEl: table,
       xValues: masterTs,
       series: [{ name: "Valor total", color: CATEGORICAL_HUES[0], values: totalValues, area: true }],
+      width: PROJ_W,
+      height: PROJ_H,
     });
     note.textContent = "No hay suficiente historial todavía para proyectar una tendencia.";
     return;
@@ -886,7 +1020,10 @@ function renderProjectionChart() {
   const v1 = totalValues[lastIdx];
   const yearsSpan = (t1 - t0) / (365.25 * 24 * 3600);
 
-  if (yearsSpan < 0.4 || v0 <= 0 || v1 <= 0) {
+  // Se requiere al menos 1 año de historial: con ventanas más cortas, la tasa
+  // anualizada queda dominada por ruido de corto plazo y al componerla a 10 años
+  // el resultado se dispara a valores absurdos.
+  if (yearsSpan < 1 || v0 <= 0 || v1 <= 0) {
     renderLineChart({
       svgEl: svg,
       tooltipEl: tooltip,
@@ -894,13 +1031,23 @@ function renderProjectionChart() {
       tableEl: table,
       xValues: masterTs,
       series: [{ name: "Valor total", color: CATEGORICAL_HUES[0], values: totalValues, area: true }],
+      width: PROJ_W,
+      height: PROJ_H,
     });
-    note.textContent = "Se necesitan al menos ~6 meses de historial para calcular una proyección razonable.";
+    note.textContent = "Se necesita al menos 1 año de historial para calcular una proyección razonable.";
     return;
   }
 
-  const cagr = Math.pow(v1 / v0, 1 / yearsSpan) - 1;
-  const H = masterTs.length;
+  const rawCagr = Math.pow(v1 / v0, 1 / yearsSpan) - 1;
+  // Limita la tasa anualizada a un rango creíble a largo plazo: sin este límite,
+  // un buen tramo reciente (aunque corto) se compone durante 10 años y da
+  // resultados irreales que además aplastan el resto del gráfico.
+  const CAGR_MIN = -0.3;
+  const CAGR_MAX = 0.2;
+  const cagr = Math.min(CAGR_MAX, Math.max(CAGR_MIN, rawCagr));
+  const wasClamped = Math.abs(cagr - rawCagr) > 0.0001;
+
+  const seriesLen = masterTs.length;
   const futureTs = [];
   const futureValues = [];
   for (let m = 1; m <= 120; m++) {
@@ -913,7 +1060,7 @@ function renderProjectionChart() {
   const projectionAligned = [
     ...Array(lastIdx).fill(null),
     v1,
-    ...Array(H - lastIdx - 1).fill(null),
+    ...Array(seriesLen - lastIdx - 1).fill(null),
     ...futureValues,
   ];
   const proj5 = futureValues[59];
@@ -925,6 +1072,8 @@ function renderProjectionChart() {
     legendEl: legend,
     tableEl: table,
     xValues: combinedTs,
+    width: PROJ_W,
+    height: PROJ_H,
     series: [
       { name: "Histórico", color: CATEGORICAL_HUES[0], values: historicalAligned, area: true },
       {
@@ -943,7 +1092,8 @@ function renderProjectionChart() {
 
   note.textContent =
     `Valor actual: ${fmtMoney(v1)}. Con el crecimiento anual compuesto de los últimos ${yearsSpan.toFixed(1)} años ` +
-    `(${(cagr * 100).toFixed(1)}% anual), la proyección simple da ${fmtMoney(proj5)} en 5 años y ${fmtMoney(proj10)} en 10 años. ` +
+    `(${(rawCagr * 100).toFixed(1)}% anual${wasClamped ? `, limitado a ${(cagr * 100).toFixed(0)}% para una proyección más realista` : ""}), ` +
+    `la proyección simple da ${fmtMoney(proj5)} en 5 años y ${fmtMoney(proj10)} en 10 años. ` +
     `Es una extrapolación lineal del histórico (incluye aportaciones pasadas, no solo rentabilidad) y no garantiza resultados futuros.`;
 }
 
@@ -1234,6 +1384,23 @@ document.getElementById("csv-import-btn").addEventListener("click", async () => 
   loadPortfolioHistory();
 });
 
+function initTabs() {
+  const buttons = document.querySelectorAll(".tab-btn");
+  buttons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      buttons.forEach((b) => {
+        b.classList.toggle("active", b === btn);
+        b.setAttribute("aria-selected", b === btn ? "true" : "false");
+      });
+      document.querySelectorAll(".tab-panel").forEach((panel) => {
+        panel.hidden = panel.id !== `tab-${btn.dataset.tab}`;
+      });
+    });
+  });
+}
+
+initTabs();
+initAssetDetailModal();
 initHoldingsTableEvents();
 render();
 refreshPrices();
