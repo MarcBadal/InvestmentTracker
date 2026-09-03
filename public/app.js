@@ -1425,6 +1425,7 @@ function renderHistoryCharts() {
     document.getElementById("total-series-toggle").hidden = true;
     assetsGrid.innerHTML = "";
     assetsTable.innerHTML = "";
+    renderYearTab();
     renderProjectionChart();
     return;
   }
@@ -1463,6 +1464,7 @@ function renderHistoryCharts() {
   renderAssetGrid(assetsGrid, masterTs, tileSeries);
   buildDataTable(assetsTable, masterTs, tileSeries);
 
+  renderYearTab();
   renderProjectionChart();
 }
 
@@ -1577,6 +1579,217 @@ function initAssetDetailModal() {
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !overlay.hidden) closeAssetDetail();
+  });
+}
+
+// ---------- Desglose por año ----------
+
+let selectedYear = null;
+
+// Valor de una serie en una fecha: el último punto de la rejilla en esa fecha o antes.
+// Un hueco (null) significa que en ese momento no se tenía la posición, o sea 0.
+function seriesValueAt(values, masterTs, ts) {
+  let idx = -1;
+  for (let i = 0; i < masterTs.length; i++) {
+    if (masterTs[i] > ts) break;
+    idx = i;
+  }
+  return idx < 0 ? 0 : values[idx] ?? 0;
+}
+
+// Dinero que entró y salió de una posición dentro de un periodo. Los traspasos se
+// excluyen: no son dinero tuyo entrando ni saliendo, solo cambian de fondo o de clase, y
+// contarlos falsearía la ganancia del periodo en que ocurren.
+function flowsInPeriod(holding, startTs, endTs) {
+  let aportado = 0;
+  let retirado = 0;
+  (holding.movements || []).forEach((m) => {
+    if (m.contrapartida) return;
+    const info = MOVEMENT_TYPES[m.kind];
+    if (!info) return;
+    const t = new Date(m.fecha).getTime() / 1000;
+    if (Number.isNaN(t) || t < startTs || t > endTs) return;
+    const importe = m.importeEur != null ? m.importeEur : m.titulos * m.precioUnitario;
+    if (!(importe > 0)) return;
+    if (info.tipo === "entrada") aportado += importe;
+    else retirado += importe;
+  });
+  return { aportado, retirado };
+}
+
+function availableYears() {
+  const years = new Set();
+  holdings.forEach((h) =>
+    (h.movements || []).forEach((m) => {
+      const d = new Date(m.fecha);
+      if (!Number.isNaN(d.getTime())) years.add(d.getFullYear());
+    })
+  );
+  return [...years].sort((a, b) => a - b);
+}
+
+// Ganancia de un periodo: lo que vale al final menos lo que valía al principio, quitando
+// lo que metiste por el camino. Sirve igual para un año que para un mes.
+function periodBreakdown(startTs, endTs) {
+  if (!lastPortfolioHistory) return null;
+  const { masterTs, assetSeries } = lastPortfolioHistory;
+
+  const rows = assetSeries
+    .map(({ holding, values }) => {
+      // El valor inicial se toma justo ANTES de que empiece el periodo: si no, una compra
+      // hecha el día 1 entraría a la vez en el valor de partida y en las aportaciones, y
+      // se restaría dos veces. Así además el cierre de un periodo es la apertura exacta
+      // del siguiente y las ganancias mensuales suman la del año.
+      const vStart = seriesValueAt(values, masterTs, startTs - 1);
+      const vEnd = seriesValueAt(values, masterTs, endTs);
+      const { aportado, retirado } = flowsInPeriod(holding, startTs, endTs);
+      if (vStart === 0 && vEnd === 0 && aportado === 0 && retirado === 0) return null;
+      const gain = vEnd - vStart - aportado + retirado;
+      const base = vStart + aportado;
+      return { holding, vStart, vEnd, aportado, retirado, gain, pct: base > 0 ? (gain / base) * 100 : null };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.gain - a.gain);
+
+  const total = rows.reduce(
+    (acc, r) => ({
+      vStart: acc.vStart + r.vStart,
+      vEnd: acc.vEnd + r.vEnd,
+      aportado: acc.aportado + r.aportado,
+      retirado: acc.retirado + r.retirado,
+      gain: acc.gain + r.gain,
+    }),
+    { vStart: 0, vEnd: 0, aportado: 0, retirado: 0, gain: 0 }
+  );
+  const base = total.vStart + total.aportado;
+  total.pct = base > 0 ? (total.gain / base) * 100 : null;
+  return { rows, total, vacio: rows.length === 0 };
+}
+
+const NOW_TS = () => Math.floor(Date.now() / 1000);
+
+function yearRange(year) {
+  const start = Math.floor(new Date(year, 0, 1).getTime() / 1000);
+  // Para el año en curso el "final" es hoy, no el 31 de diciembre.
+  const end = Math.min(Math.floor(new Date(year, 11, 31, 23, 59, 59).getTime() / 1000), NOW_TS());
+  return { start, end, enCurso: end >= NOW_TS() };
+}
+
+function monthRange(year, month) {
+  const start = Math.floor(new Date(year, month, 1).getTime() / 1000);
+  const end = Math.min(Math.floor(new Date(year, month + 1, 0, 23, 59, 59).getTime() / 1000), NOW_TS());
+  return { start, end, futuro: start > NOW_TS(), enCurso: end >= NOW_TS() && start <= NOW_TS() };
+}
+
+const MESES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
+let selectedMonth = null; // null = el año entero
+
+function renderMonthGrid(year) {
+  const grid = document.getElementById("month-grid");
+  grid.innerHTML = "";
+
+  for (let m = 0; m < 12; m++) {
+    const { start, end, futuro } = monthRange(year, m);
+    const data = futuro ? null : periodBreakdown(start, end);
+    const activo = selectedMonth === m;
+    const sinDatos = !data || data.vacio;
+
+    const box = document.createElement("button");
+    box.type = "button";
+    box.className = "month-box" + (activo ? " active" : "") + (sinDatos ? " empty" : "");
+    box.disabled = sinDatos;
+
+    if (sinDatos) {
+      box.innerHTML = `<span class="month-name">${MESES[m]}</span><span class="month-gain">—</span>`;
+    } else {
+      const g = data.total.gain;
+      box.innerHTML =
+        `<span class="month-name">${MESES[m]}</span>` +
+        `<span class="month-gain ${g >= 0 ? "good" : "bad"}">${g >= 0 ? "▲" : "▼"} ${fmtMoney(Math.abs(g))}</span>` +
+        `<span class="month-pct ${g >= 0 ? "good" : "bad"}">${data.total.pct == null ? "—" : fmtPct(data.total.pct)}</span>`;
+      box.addEventListener("click", () => {
+        selectedMonth = activo ? null : m; // volver a pulsar deselecciona
+        renderYearTab();
+      });
+    }
+    grid.appendChild(box);
+  }
+}
+
+function renderYearTab() {
+  const toggle = document.getElementById("year-toggle");
+  const body = document.getElementById("year-body");
+  const empty = document.getElementById("year-empty");
+  const heroLabel = document.getElementById("year-hero-label");
+  const heroValue = document.getElementById("year-hero-value");
+  const heroSub = document.getElementById("year-hero-sub");
+
+  const years = availableYears();
+  if (!years.length || !lastPortfolioHistory) {
+    toggle.innerHTML = "";
+    body.innerHTML = "";
+    document.getElementById("month-grid").innerHTML = "";
+    empty.hidden = false;
+    heroValue.textContent = "—";
+    heroSub.textContent = "";
+    return;
+  }
+  empty.hidden = true;
+  if (!years.includes(selectedYear)) {
+    selectedYear = years[years.length - 1];
+    selectedMonth = null;
+  }
+
+  toggle.innerHTML = "";
+  years.forEach((y) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "series-chip" + (y === selectedYear ? " active" : "");
+    btn.textContent = String(y);
+    btn.addEventListener("click", () => {
+      selectedYear = y;
+      selectedMonth = null; // al cambiar de año se vuelve a la vista anual
+      renderYearTab();
+    });
+    toggle.appendChild(btn);
+  });
+
+  renderMonthGrid(selectedYear);
+
+  const rango = selectedMonth == null ? yearRange(selectedYear) : monthRange(selectedYear, selectedMonth);
+  const data = periodBreakdown(rango.start, rango.end);
+  const { total, rows } = data;
+  const periodo =
+    selectedMonth == null
+      ? `${selectedYear}${rango.enCurso ? " (año en curso)" : ""}`
+      : `${MESES[selectedMonth]} ${selectedYear}${rango.enCurso ? " (mes en curso)" : ""}`;
+
+  heroLabel.textContent = `Ganancia en ${periodo}`;
+  heroValue.textContent = (total.gain >= 0 ? "▲ " : "▼ ") + fmtMoney(Math.abs(total.gain));
+  heroValue.className = "hero-value " + (total.gain >= 0 ? "good" : "bad");
+  heroSub.innerHTML =
+    `<span>${total.pct == null ? "—" : fmtPct(total.pct)} sobre el capital invertido</span>` +
+    `<span>${fmtMoney(total.vStart)} al empezar</span>` +
+    `<span>${fmtMoney(total.aportado)} aportado</span>` +
+    `<span>${fmtMoney(total.vEnd)} al ${rango.enCurso ? "día de hoy" : "cerrar el periodo"}</span>`;
+
+  document.getElementById("year-table-title").textContent =
+    selectedMonth == null ? "Qué aportó cada activo en el año" : `Qué aportó cada activo en ${periodo}`;
+
+  body.innerHTML = "";
+  rows.forEach((r) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="symbol">${holdingLabel(r.holding)}</td>
+      <td>${fmtMoney(r.vStart)}</td>
+      <!-- inicio del periodo elegido: año o mes -->
+      <td>${fmtMoney(r.aportado)}</td>
+      <td>${r.retirado > 0 ? fmtMoney(r.retirado) : "—"}</td>
+      <td>${fmtMoney(r.vEnd)}</td>
+      <td class="gain ${r.gain >= 0 ? "good" : "bad"}">${r.gain >= 0 ? "▲" : "▼"} ${fmtMoney(Math.abs(r.gain))}</td>
+      <td class="gain ${r.gain >= 0 ? "good" : "bad"}">${r.pct == null ? "—" : fmtPct(r.pct)}</td>
+    `;
+    body.appendChild(tr);
   });
 }
 

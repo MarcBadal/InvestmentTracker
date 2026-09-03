@@ -17,6 +17,7 @@
 <main>
   <div class="tabs" role="tablist">
     <button type="button" class="tab-btn active" id="tab-btn-cartera" data-tab="cartera" role="tab" aria-selected="true">Cartera</button>
+    <button type="button" class="tab-btn" id="tab-btn-anual" data-tab="anual" role="tab" aria-selected="false">Por a&ntilde;o</button>
     <button type="button" class="tab-btn" id="tab-btn-cerradas" data-tab="cerradas" role="tab" aria-selected="false">Posiciones cerradas</button>
     <button type="button" class="tab-btn" id="tab-btn-proyeccion" data-tab="proyeccion" role="tab" aria-selected="false">Proyecci&oacute;n</button>
   </div>
@@ -194,6 +195,42 @@
         <summary>Ver como tabla</summary>
         <div id="chart-asset-detail-table"></div>
       </details>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="tab-anual" role="tabpanel" hidden>
+    <div class="series-toggle" id="year-toggle"></div>
+
+    <section class="hero">
+      <div class="hero-label" id="year-hero-label">Ganancia del a&ntilde;o</div>
+      <div class="hero-value" id="year-hero-value">&mdash;</div>
+      <div class="hero-sub" id="year-hero-sub"></div>
+    </section>
+
+    <div class="card">
+      <h2>Mes a mes</h2>
+      <p class="chart-hint">Hac&eacute; clic en un mes para ver su desglose por activo; volv&eacute; a pulsarlo para ver el a&ntilde;o entero.</p>
+      <div class="month-grid" id="month-grid"></div>
+    </div>
+
+    <div class="card">
+      <h2 id="year-table-title">Qu&eacute; aport&oacute; cada activo en el a&ntilde;o</h2>
+      <p class="chart-hint">Ganancia = valor al final &minus; valor al principio &minus; lo que metiste durante el periodo. Los traspasos entre fondos no cuentan como aportaci&oacute;n ni como retirada.</p>
+      <table id="year-table">
+        <thead>
+          <tr>
+            <th>Activo</th>
+            <th>Valor inicial</th>
+            <th>Aportado</th>
+            <th>Retirado</th>
+            <th>Valor final</th>
+            <th>Ganancia</th>
+            <th>Rend.</th>
+          </tr>
+        </thead>
+        <tbody id="year-body"></tbody>
+      </table>
+      <div class="empty-state" id="year-empty" hidden>Carg&aacute; la evoluci&oacute;n del hist&oacute;rico para ver el desglose por a&ntilde;o.</div>
     </div>
   </div>
 

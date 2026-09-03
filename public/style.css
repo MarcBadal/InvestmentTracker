@@ -149,6 +149,52 @@ main {
 }
 .hero-sub .good { color: var(--success-text); }
 .hero-sub .bad { color: var(--critical-text); }
+.hero-value.good { color: var(--success-text); }
+.hero-value.bad { color: var(--critical-text); }
+
+.month-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+  gap: 8px;
+}
+.month-box {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--page-plane);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+.month-box:hover:not(:disabled) { border-color: var(--series-1); }
+.month-box.active {
+  border-color: var(--series-1);
+  background: var(--surface-1);
+  box-shadow: inset 0 0 0 1px var(--series-1);
+}
+.month-box.empty { opacity: 0.45; cursor: default; }
+.month-name {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.month-gain {
+  font-size: 0.92rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+.month-pct {
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+.month-gain.good, .month-pct.good { color: var(--success-text); }
+.month-gain.bad, .month-pct.bad { color: var(--critical-text); }
 @media (max-width: 600px) {
   .hero-value { font-size: 2rem; }
 }
