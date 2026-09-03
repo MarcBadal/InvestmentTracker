@@ -4,6 +4,7 @@ const TYPE_COLOR_HEX = {
   "Acción": { light: "#2a78d6", dark: "#3987e5" },
   "ETF": { light: "#eb6834", dark: "#d95926" },
   "Fondo": { light: "#1baf7a", dark: "#199e70" },
+  "Liquidez": { light: "#898781", dark: "#898781" },
 };
 
 const TIPO_ACTIVO_MAP = {
@@ -25,21 +26,50 @@ const MOVEMENT_TYPES = {
 function replayMovements(movements) {
   let qty = 0;
   let costNative = 0;
+  // Coste en EUR realmente pagado (importe_neto_eur del CSV): incluye comisiones y usa
+  // el tipo de cambio del día de la operación, no el de hoy.
+  let costEUR = 0;
+  let hasEur = true;
+  let realizedEUR = 0;
   const sorted = [...movements].sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
   for (const m of sorted) {
     const info = MOVEMENT_TYPES[m.kind];
     if (!info) continue;
+
+    // Un traspaso no es dinero que entra ni sale del bolsillo: solo cambia de fondo o de
+    // clase de participaciones. Si se tratara como venta + compra nueva, la base de coste
+    // se reiniciaría al valor de mercado de ese día y se perdería toda la rentabilidad
+    // anterior. Lo identifica la contrapartida (el ISIN del otro lado del traspaso): NO
+    // sirve dineroNuevo, que también vale "no" en las ventas y reembolsos a efectivo.
+    const traspaso = !!m.contrapartida;
+
     if (info.tipo === "entrada") {
+      // Si no hay coste acumulado que arrastrar (traspaso desde otro ISIN), se usa el
+      // importe del movimiento como base.
+      const arrastra = traspaso && costNative > 0;
       qty += m.titulos;
-      costNative += m.titulos * m.precioUnitario;
+      if (!arrastra) {
+        costNative += m.titulos * m.precioUnitario;
+        if (m.importeEur != null) costEUR += m.importeEur;
+        else hasEur = false;
+      }
     } else if (qty > 0) {
-      const avgNative = costNative / qty;
       const removeQty = Math.min(m.titulos, qty);
-      costNative -= avgNative * removeQty;
+      if (!traspaso) {
+        const avgNative = costNative / qty;
+        const avgEUR = costEUR / qty;
+        // Ganancia realizada: lo cobrado por la venta menos el coste medio de lo vendido.
+        if (m.importeEur != null) {
+          const cobradoEUR = m.importeEur * (removeQty / m.titulos);
+          realizedEUR += cobradoEUR - avgEUR * removeQty;
+        }
+        costNative -= avgNative * removeQty;
+        costEUR -= avgEUR * removeQty;
+      }
       qty -= removeQty;
     }
   }
-  return { qty, costNative };
+  return { qty, costNative, costEUR: hasEur ? costEUR : null, realizedEUR };
 }
 
 const CATEGORICAL_HUES = [
@@ -54,9 +84,12 @@ const CATEGORICAL_HUES = [
 ];
 
 function recomputeHolding(h) {
-  const { qty, costNative } = replayMovements(h.movements);
+  const { qty, costNative, costEUR, realizedEUR } = replayMovements(h.movements);
   h.quantity = qty;
   h.avgCostNative = qty > 0 ? costNative / qty : 0;
+  h.costEUR = costEUR;
+  h.realizedEUR = realizedEUR;
+  h.closed = qty <= 0.0001;
 }
 
 function ensureMovements(h) {
@@ -64,7 +97,7 @@ function ensureMovements(h) {
     h.movements = [
       {
         id: crypto.randomUUID(),
-        fecha: new Date().toISOString().slice(0, 10),
+        fecha: toIsoDate(new Date()),
         kind: "compra",
         titulos: h.quantity ?? 0,
         precioUnitario: h.avgCostNative ?? h.buyPrice ?? 0,
@@ -82,7 +115,10 @@ function loadHoldings() {
   } catch {
     data = [];
   }
-  data.forEach(ensureMovements);
+  data.forEach((h) => {
+    ensureMovements(h);
+    recomputeHolding(h); // deja al día closed/realizedEUR/costEUR según los movimientos
+  });
   return data;
 }
 
@@ -90,9 +126,27 @@ function saveHoldings(holdings) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(holdings));
 }
 
+// Modo privado: oculta todos los importes y deja solo los porcentajes. Se centraliza en
+// fmtMoney porque es por donde pasa cada cifra de dinero de la app.
+const PRIVATE_KEY = "investmentTracker.private";
+let privateMode = localStorage.getItem(PRIVATE_KEY) === "1";
+const MASK = "•••";
+
+function setPrivateMode(on) {
+  privateMode = on;
+  localStorage.setItem(PRIVATE_KEY, on ? "1" : "0");
+}
+
 function fmtMoney(n, currency = "EUR") {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  if (privateMode) return MASK;
   return n.toLocaleString("es-ES", { style: "currency", currency, maximumFractionDigits: 2 });
+}
+
+// Cantidades de títulos: también son un dato patrimonial, se ocultan igual.
+function fmtQty(n) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  return privateMode ? MASK : String(n);
 }
 
 function fmtPct(n) {
@@ -129,7 +183,7 @@ function computeRow(h) {
   return { ...h, currency, price, avgCostNative, marketValueNative, marketValueEUR, costEUR, gainEUR, gainPct };
 }
 
-function renderTiles(rows) {
+function renderTiles(rows, realized = 0, cash = 0) {
   const invested = rows.reduce((s, r) => s + r.costEUR, 0);
   const current = rows.reduce((s, r) => s + r.marketValueEUR, 0);
   const gain = current - invested;
@@ -138,9 +192,38 @@ function renderTiles(rows) {
   document.getElementById("tile-invested").textContent = fmtMoney(invested);
   document.getElementById("tile-current").textContent = fmtMoney(current);
 
+  const cashEl = document.getElementById("tile-cash");
+  // No se pisa mientras se está escribiendo el saldo a mano.
+  if (document.activeElement !== cashEl) {
+    cashEl.type = privateMode ? "text" : "number";
+    cashEl.value = privateMode ? MASK : cash.toFixed(2);
+  }
+  cashEl.readOnly = privateMode; // en modo privado no se edita: no se ve lo que hay
+  cashEl.title = privateMode
+    ? "Desactivá el modo privado para ver o editar el saldo"
+    : `Patrimonio total (invertido + líquido): ${fmtMoney(current + cash)}`;
+
+  const patrimonio = current + cash;
+  const pctAuto = Math.round(cashAdjust.factor * 100);
+  const partes = [];
+  // En modo privado el peso de la liquidez sobre el total sí es informativo y no revela
+  // el importe.
+  if (privateMode) partes.push(`${(patrimonio > 0 ? (cash / patrimonio) * 100 : 0).toFixed(1)}% del patrimonio`);
+  else partes.push(`Patrimonio: ${fmtMoney(patrimonio)}`);
+  if (cashMovements(holdings).some((m) => m.tipo === "entrada" && m.origen === "auto")) {
+    partes.push(`~${pctAuto}% de las compras pagado con liquidez`);
+  }
+  if (cashAdjust.delta && !privateMode) partes.push(`resto: ${fmtMoney(cashAdjust.delta)}`);
+  document.getElementById("cash-note").textContent = partes.join(" · ");
+
   const gainEl = document.getElementById("tile-gain");
   gainEl.textContent = (gain >= 0 ? "▲ " : "▼ ") + fmtMoney(Math.abs(gain));
   gainEl.className = "value " + (gain >= 0 ? "good" : "bad");
+
+  const realizedEl = document.getElementById("tile-realized");
+  realizedEl.textContent = (realized >= 0 ? "▲ " : "▼ ") + fmtMoney(Math.abs(realized));
+  realizedEl.className = "value " + (realized >= 0 ? "good" : "bad");
+  realizedEl.title = `Ganancia acumulada total (latente + realizada): ${fmtMoney(gain + realized)}`;
 
   const pctEl = document.getElementById("tile-pct");
   pctEl.textContent = fmtPct(gainPct);
@@ -152,7 +235,7 @@ function renderMovementsPanel(holding) {
   const rows = movs
     .map(
       (m) => `
-      <tr data-movement-id="${m.id}">
+      <tr data-movement-id="${m.id}" data-mov-row>
         <td><input type="date" class="mov-fecha" value="${m.fecha}"></td>
         <td>
           <select class="mov-kind">
@@ -163,22 +246,51 @@ function renderMovementsPanel(holding) {
         </td>
         <td><input type="number" step="any" min="0" class="mov-titulos" value="${m.titulos}"></td>
         <td><input type="number" step="any" min="0" class="mov-precio" value="${m.precioUnitario}"></td>
+        <td>${movementOriginField(m)}</td>
         <td class="remove"><button class="mov-delete" title="Eliminar movimiento">✕</button></td>
       </tr>`
     )
     .join("");
 
+  if (privateMode) {
+    return `
+      <div class="movements-panel" data-holding-id="${holding.id}">
+        <p class="empty-movements">Modo privado activo. Desactiv&aacute; &laquo;Mostrar importes&raquo; para ver y editar los movimientos.</p>
+      </div>`;
+  }
+
   return `
     <div class="movements-panel" data-holding-id="${holding.id}">
       <table class="movements-table">
         <thead>
-          <tr><th>Fecha</th><th>Operaci&oacute;n</th><th>T&iacute;tulos</th><th>Precio unitario (${holding.currency})</th><th></th></tr>
+          <tr><th>Fecha</th><th>Operaci&oacute;n</th><th>T&iacute;tulos</th><th>Precio unitario (${holding.currency})</th><th>Origen del dinero</th><th></th></tr>
         </thead>
-        <tbody>${rows || `<tr><td colspan="5" class="empty-movements">Sin movimientos registrados.</td></tr>`}</tbody>
+        <tbody>${rows || `<tr><td colspan="6" class="empty-movements">Sin movimientos registrados.</td></tr>`}</tbody>
       </table>
       <button type="button" class="mov-add">+ A&ntilde;adir movimiento</button>
     </div>
   `;
+}
+
+// Selector de origen del dinero. Solo tiene sentido en las entradas: define si la compra
+// consumió la liquidez de la cuenta o si el dinero entró de fuera. En las salidas es
+// informativo (a liquidez, o traspaso si va directo a otro fondo).
+function movementOriginField(m) {
+  const info = MOVEMENT_TYPES[m.kind];
+  if (m.contrapartida) return `<span class="mov-origin-static">Traspaso</span>`;
+  if (!info || info.tipo === "salida") return `<span class="mov-origin-static">&rarr; A liquidez</span>`;
+  const origen = m.origen || "auto";
+  const opciones = [
+    ["auto", "Automático"],
+    ["nuevo", "Dinero nuevo"],
+    ["liquidez", "De la liquidez"],
+  ];
+  return `
+    <select class="mov-origen">
+      ${opciones
+        .map(([v, label]) => `<option value="${v}" ${origen === v ? "selected" : ""}>${label}</option>`)
+        .join("")}
+    </select>`;
 }
 
 function renderTable(rows) {
@@ -192,7 +304,12 @@ function renderTable(rows) {
     const expanded = expandedIds.has(r.id);
     const tr = document.createElement("tr");
     tr.className = "holding-row";
-    const warn = r.quoteError ? ` title="No se pudo actualizar el precio: ${r.quoteError}"` : "";
+    const tip = r.quoteError
+      ? `No se pudo actualizar el precio: ${r.quoteError}`
+      : [r.name, r.quoteName ? `Cotiza como: ${r.quoteName} (${r.symbol}, ${r.quoteCurrency || "?"})` : null]
+          .filter(Boolean)
+          .join(" — ");
+    const warn = tip ? ` title="${tip.replace(/"/g, "&quot;")}"` : "";
     const symbolField =
       editingSymbolId === r.id
         ? `<input type="text" class="edit-symbol-input" data-id="${r.id}" value="${r.symbol}" autocomplete="off">`
@@ -200,7 +317,7 @@ function renderTable(rows) {
     tr.innerHTML = `
       <td class="symbol"${warn}><button class="toggle-movements" type="button" data-id="${r.id}">${expanded ? "▾" : "▸"}</button> ${symbolField}</td>
       <td>${r.type}</td>
-      <td>${r.quantity}</td>
+      <td>${fmtQty(r.quantity)}</td>
       <td>${fmtMoney(r.avgCostNative, r.currency)}</td>
       <td>${fmtMoney(r.costEUR)}</td>
       <td>${fmtMoney(r.price, r.currency)}</td>
@@ -264,7 +381,7 @@ function initHoldingsTableEvents() {
       const holding = holdings.find((h) => h.id === holdingId);
       holding.movements.push({
         id: crypto.randomUUID(),
-        fecha: new Date().toISOString().slice(0, 10),
+        fecha: toIsoDate(new Date()),
         kind: "compra",
         titulos: 0,
         precioUnitario: 0,
@@ -302,10 +419,12 @@ function initHoldingsTableEvents() {
     else if (e.target.classList.contains("mov-kind")) mov.kind = e.target.value;
     else if (e.target.classList.contains("mov-titulos")) mov.titulos = parseFloat(e.target.value) || 0;
     else if (e.target.classList.contains("mov-precio")) mov.precioUnitario = parseFloat(e.target.value) || 0;
+    else if (e.target.classList.contains("mov-origen")) mov.origen = e.target.value;
 
     recomputeHolding(holding);
     saveHoldings(holdings);
     render();
+    loadPortfolioHistory();
   });
 
   function commitSymbolEdit(input) {
@@ -319,6 +438,7 @@ function initHoldingsTableEvents() {
     const newSymbol = input.value.trim().toUpperCase();
     if (newSymbol && newSymbol !== holding.symbol) {
       holding.symbol = newSymbol;
+      holding.symbolManual = true; // que una reimportación del CSV no lo pise
       holding.lastPrice = null;
       holding.quoteError = null;
       saveHoldings(holdings);
@@ -353,11 +473,14 @@ function initHoldingsTableEvents() {
   });
 }
 
-function renderDonut(rows) {
+function renderDonut(rows, cash = 0) {
   const byType = {};
   rows.forEach((r) => {
     byType[r.type] = (byType[r.type] || 0) + r.marketValueEUR;
   });
+  // El dinero sin invertir también es parte de la cartera: dejarlo fuera del reparto
+  // haría creer que estás más invertido de lo que estás.
+  if (cash > 0.005) byType["Liquidez"] = cash;
   const total = Object.values(byType).reduce((a, b) => a + b, 0);
   const dark = isDarkMode();
 
@@ -372,7 +495,7 @@ function renderDonut(rows) {
     return;
   }
 
-  const order = ["Acción", "ETF", "Fondo"];
+  const order = ["Acción", "ETF", "Fondo", "Liquidez"];
   const r = 70;
   const circumference = 2 * Math.PI * r;
   let offset = 0;
@@ -413,11 +536,207 @@ function renderDonut(rows) {
   });
 }
 
+// Movimientos de la liquidez de la cuenta. Vender o reembolsar no hace desaparecer el
+// dinero: queda parado en la cuenta hasta que se reinvierte o se saca al banco.
+//   venta/reembolso sin contrapartida -> entra dinero a liquidez
+//   traspaso (con contrapartida)      -> no la toca, va de un fondo a otro
+//   compra                            -> según su campo origen (auto / nuevo / liquidez)
+// El CSV no sirve para saber el origen: marca dinero_nuevo="si" en todas las compras,
+// incluso en las pagadas con el efectivo que ya había en la cuenta.
+function cashMovements(holdingList) {
+  const movs = [];
+  holdingList.forEach((h) => {
+    (h.movements || []).forEach((m) => {
+      const info = MOVEMENT_TYPES[m.kind];
+      if (!info || m.contrapartida) return;
+      const importe = m.importeEur != null ? m.importeEur : m.titulos * m.precioUnitario;
+      if (!(importe > 0)) return;
+      const t = Math.floor(new Date(m.fecha).getTime() / 1000);
+      if (Number.isNaN(t)) return;
+      movs.push({ t, tipo: info.tipo, importe, origen: m.origen || "auto" });
+    });
+  });
+  return movs.sort((a, b) => a.t - b.t);
+}
+
+// Saldo de liquidez a lo largo del tiempo. Por defecto ("auto") una compra se paga con el
+// dinero parado que haya disponible: si no, el mismo dinero aparecería a la vez como
+// líquido y como la inversión que se compró con él, inflando el patrimonio.
+// `autoFactor` es la fracción de las compras "auto" que sale de la liquidez; se calibra
+// contra el saldo real que declara el usuario, porque el CSV no distingue el origen.
+function cashTimeline(holdingList, autoFactor = 1) {
+  const points = [];
+  let balance = 0;
+  cashMovements(holdingList).forEach((m) => {
+    if (m.tipo === "salida") {
+      balance += m.importe;
+    } else if (m.origen !== "nuevo") {
+      const pedido = m.origen === "liquidez" ? m.importe : m.importe * autoFactor;
+      balance -= Math.min(balance, pedido);
+    }
+    points.push({ t: m.t, balance });
+  });
+  return points;
+}
+
+// El CSV no dice qué compras se pagaron con la liquidez que ya había (las marca todas
+// como dinero nuevo), así que el saldo deducido puede quedar alto. Este ajuste guarda la
+// diferencia con el saldo real que indique el usuario, con la fecha en que lo indicó,
+// para no falsear el histórico anterior a esa corrección.
+const CASH_ADJUST_KEY = "investmentTracker.cashAdjust";
+
+function loadCashAdjust() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(CASH_ADJUST_KEY));
+    if (raw && typeof raw.factor === "number") return raw;
+  } catch {
+    /* sin ajuste guardado */
+  }
+  return { factor: 1, delta: 0, fecha: null };
+}
+
+let cashAdjust = loadCashAdjust();
+
+function cashBalanceAt(points, ts, { withAdjust = true } = {}) {
+  let balance = 0;
+  for (const p of points) {
+    if (p.t > ts) break;
+    balance = p.balance;
+  }
+  // Resto que no se pudo explicar repartiendo entre las compras (p. ej. un ingreso o una
+  // retirada al banco, que no están en el CSV). Se aplica desde la fecha en que se indicó.
+  if (withAdjust && cashAdjust.delta && cashAdjust.fecha) {
+    const adjustTs = Math.floor(new Date(cashAdjust.fecha).getTime() / 1000);
+    if (ts >= adjustTs) balance += cashAdjust.delta;
+  }
+  return balance;
+}
+
+function currentCashPoints() {
+  return cashTimeline(holdings, cashAdjust.factor);
+}
+
+function currentCash(opts) {
+  return cashBalanceAt(currentCashPoints(), Math.floor(Date.now() / 1000), opts);
+}
+
+function finalBalance(factor) {
+  const pts = cashTimeline(holdings, factor);
+  return pts.length ? pts[pts.length - 1].balance : 0;
+}
+
+// Calibra qué parte de las compras "auto" salió de la liquidez para que el saldo final
+// coincida con el que declara el usuario. Es la única incógnita: el CSV marca todas las
+// compras igual. Lo que no se pueda explicar así queda como resto puntual.
+function setCashBalance(target) {
+  const maxBal = finalBalance(0); // ninguna compra sale de la liquidez
+  const minBal = finalBalance(1); // todas salen de la liquidez
+
+  let factor;
+  if (target >= maxBal) factor = 0;
+  else if (target <= minBal) factor = 1;
+  else {
+    let lo = 0;
+    let hi = 1;
+    for (let i = 0; i < 60; i++) {
+      const mid = (lo + hi) / 2;
+      if (finalBalance(mid) > target) lo = mid;
+      else hi = mid;
+    }
+    factor = (lo + hi) / 2;
+  }
+
+  const delta = target - finalBalance(factor);
+  cashAdjust = {
+    factor,
+    delta: Math.abs(delta) < 0.005 ? 0 : delta,
+    fecha: Math.abs(delta) < 0.005 ? null : toIsoDate(new Date()),
+  };
+  localStorage.setItem(CASH_ADJUST_KEY, JSON.stringify(cashAdjust));
+}
+
+// Resumen de lo aportado y lo recuperado en una posición. Los traspasos se excluyen:
+// no son dinero que entró ni salió del bolsillo, solo cambió de fondo.
+function positionCashflows(h) {
+  let invertido = 0;
+  let recuperado = 0;
+  (h.movements || []).forEach((m) => {
+    const info = MOVEMENT_TYPES[m.kind];
+    if (!info || m.contrapartida || m.importeEur == null) return;
+    if (info.tipo === "entrada") invertido += m.importeEur;
+    else recuperado += m.importeEur;
+  });
+  const fechas = (h.movements || []).map((m) => m.fecha).filter(Boolean).sort();
+  return { invertido, recuperado, desde: fechas[0], hasta: fechas[fechas.length - 1] };
+}
+
+function renderClosedPositions() {
+  const body = document.getElementById("closed-body");
+  const empty = document.getElementById("closed-empty");
+  body.innerHTML = "";
+
+  // Cerradas, y también abiertas con ventas parciales (ahí ya hay ganancia realizada).
+  const past = holdings
+    .filter((h) => h.closed || Math.abs(h.realizedEUR || 0) > 0.005)
+    .map((h) => ({ h, ...positionCashflows(h) }))
+    .sort((a, b) => String(b.hasta || "").localeCompare(String(a.hasta || "")));
+
+  empty.hidden = past.length > 0;
+
+  let totalInv = 0;
+  let totalRec = 0;
+  let totalGain = 0;
+
+  past.forEach(({ h, invertido, recuperado, desde, hasta }) => {
+    const gain = h.realizedEUR || 0;
+    const pct = invertido > 0 ? (gain / invertido) * 100 : null;
+    totalInv += invertido;
+    totalRec += recuperado;
+    totalGain += gain;
+
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="symbol">${h.symbol}${h.closed ? "" : ' <span class="badge-partial">parcial</span>'}</td>
+      <td>${h.name || "—"}</td>
+      <td>${h.type || "—"}</td>
+      <td>${fmtShortDate(desde)} → ${fmtShortDate(hasta)}</td>
+      <td>${fmtMoney(invertido)}</td>
+      <td>${fmtMoney(recuperado)}</td>
+      <td class="gain ${gain >= 0 ? "good" : "bad"}">${gain >= 0 ? "▲" : "▼"} ${fmtMoney(Math.abs(gain))}</td>
+      <td class="gain ${gain >= 0 ? "good" : "bad"}">${pct == null ? "—" : fmtPct(pct)}</td>
+    `;
+    body.appendChild(tr);
+  });
+
+  const totalPct = totalInv > 0 ? (totalGain / totalInv) * 100 : 0;
+  document.getElementById("tile-closed-received").textContent = fmtMoney(totalRec);
+  document.getElementById("tile-closed-invested").textContent = fmtMoney(totalInv);
+
+  const gainEl = document.getElementById("tile-closed-gain");
+  gainEl.textContent = (totalGain >= 0 ? "▲ " : "▼ ") + fmtMoney(Math.abs(totalGain));
+  gainEl.className = "value " + (totalGain >= 0 ? "good" : "bad");
+
+  const pctEl = document.getElementById("tile-closed-pct");
+  pctEl.textContent = fmtPct(totalPct);
+  pctEl.className = "value " + (totalPct >= 0 ? "good" : "bad");
+}
+
+function fmtShortDate(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleDateString("es-ES", { month: "short", year: "numeric" });
+}
+
 function render() {
-  const rows = holdings.map(computeRow);
-  renderTiles(rows);
+  // Las cerradas se conservan (aportan ganancia realizada e histórico) pero no son
+  // posiciones actuales: fuera de la tabla, el donut y el valor de mercado.
+  const rows = holdings.filter((h) => !h.closed).map(computeRow);
+  const realized = holdings.reduce((s, h) => s + (h.realizedEUR || 0), 0);
+  const cash = currentCash();
+  renderTiles(rows, realized, cash);
   renderTable(rows);
-  renderDonut(rows);
+  renderDonut(rows, cash);
+  renderClosedPositions();
 }
 
 // ---------- Evolución histórica y proyección ----------
@@ -451,16 +770,44 @@ function quantityAtDate(movements, cutoffMs) {
   return replayMovements(relevant).qty;
 }
 
+// Precios tomados de los propios movimientos importados. Sirven de respaldo cuando
+// Yahoo no tiene histórico para esas fechas (típico en fondos: la clase nueva de
+// participaciones solo cotiza desde su creación, aunque la posición sea más antigua).
+function movementPricePoints(holding) {
+  return (holding.movements || [])
+    .filter((m) => m.precioUnitario > 0 && m.fecha)
+    .map((m) => ({ t: Math.floor(new Date(m.fecha).getTime() / 1000), close: m.precioUnitario }))
+    .sort((a, b) => a.t - b.t);
+}
+
+// Elige el precio de una fecha entre el de mercado y el pagado según el CSV.
+// Se queda con el del CSV cuando el de mercado está en otra escala (más de 5x de
+// diferencia): pasa en cambios de clase de participaciones o splits, donde la serie
+// de Yahoo es de la clase nueva y en esa fecha aún se tenía la vieja.
+const SCALE_MISMATCH = 5;
+
+function priceAt(marketPoints, ownPoints, ts) {
+  const mkt = marketPoints ? nearestPriceAtOrBefore(marketPoints, ts) : null;
+  const own = ownPoints.length ? nearestPriceAtOrBefore(ownPoints, ts) : null;
+  if (!mkt) return own ? own.close : null;
+  if (!own || !own.close) return mkt.close;
+  const ratio = mkt.close / own.close;
+  if (ratio > SCALE_MISMATCH || ratio < 1 / SCALE_MISMATCH) return own.close;
+  return mkt.close;
+}
+
 function buildAlignedSeries(holding, masterTs, historyBySymbol, fxPoints) {
   const rec = historyBySymbol[holding.symbol];
-  if (!rec || !rec.points || !rec.points.length) return masterTs.map(() => null);
-  const currency = holding.currency || rec.currency || "EUR";
+  const marketPoints = rec && rec.points && rec.points.length ? rec.points : null;
+  const ownPoints = movementPricePoints(holding);
+  if (!marketPoints && !ownPoints.length) return masterTs.map(() => null);
+  const currency = holding.currency || (rec && rec.currency) || "EUR";
   return masterTs.map((ts) => {
-    const pricePt = nearestPriceAtOrBefore(rec.points, ts);
-    if (!pricePt) return null;
     const qty = quantityAtDate(holding.movements, ts * 1000);
     if (qty <= 0.0001) return null;
-    const valueNative = qty * pricePt.close;
+    const price = priceAt(marketPoints, ownPoints, ts);
+    if (price == null) return null;
+    const valueNative = qty * price;
     if (currency === "EUR") return valueNative;
     const fxPt = fxPoints ? nearestPriceAtOrBefore(fxPoints, ts) : null;
     if (!fxPt || !fxPt.close) return null;
@@ -577,7 +924,7 @@ function renderLineChart({ svgEl, tooltipEl, legendEl, tableEl, xValues, series,
       label.setAttribute("y", (y + 3).toFixed(1));
       label.setAttribute("text-anchor", "end");
       label.setAttribute("class", "chart-axis-label");
-      label.textContent = val.toLocaleString("es-ES", { maximumFractionDigits: 0 });
+      label.textContent = privateMode ? "" : val.toLocaleString("es-ES", { maximumFractionDigits: 0 });
       g.appendChild(label);
     }
 
@@ -810,7 +1157,8 @@ async function refreshPrices() {
   btn.disabled = true;
   btn.textContent = "Actualizando…";
 
-  const symbols = [...new Set(holdings.map((h) => h.symbol))];
+  // Las cerradas no necesitan cotización actual: ya no se tienen.
+  const symbols = [...new Set(holdings.filter((h) => !h.closed).map((h) => h.symbol))];
   symbols.push("EURUSD=X");
 
   try {
@@ -833,6 +1181,7 @@ async function refreshPrices() {
     }
 
     holdings = holdings.map((h) => {
+      if (h.closed) return h;
       const q = bySymbol[h.symbol];
       if (!q) return { ...h, quoteError: "sin respuesta" };
       if (q.price == null) return { ...h, quoteError: q.error };
@@ -841,7 +1190,9 @@ async function refreshPrices() {
       if (price == null) {
         return { ...h, quoteError: `cotización en ${q.currency}, no se pudo convertir a ${h.currency}` };
       }
-      return { ...h, lastPrice: price, name: q.name, quoteError: null };
+      // No se pisa h.name (el del CSV): se guarda aparte el nombre de lo que realmente
+      // cotiza el ticker, para poder detectar un ISIN resuelto al instrumento equivocado.
+      return { ...h, lastPrice: price, name: h.name || q.name, quoteName: q.name, quoteCurrency: q.currency, quoteError: null };
     });
     saveHoldings(holdings);
     document.getElementById("last-updated").textContent =
@@ -873,20 +1224,34 @@ function renderHistoryCharts() {
 
   if (!lastPortfolioHistory) {
     renderLineChart({ svgEl: totalSvg, tooltipEl: totalTooltip, tableEl: totalTable, xValues: [], series: [] });
+    document.getElementById("total-series-toggle").hidden = true;
     assetsGrid.innerHTML = "";
     assetsTable.innerHTML = "";
     renderProjectionChart();
     return;
   }
 
-  const { masterTs, totalValues, assetSeries } = lastPortfolioHistory;
+  const { masterTs, totalValues, investedValues, cashValues, assetSeries } = lastPortfolioHistory;
+
+  const allTotalSeries = [
+    { key: "total", name: "Total (invertido + líquido)", color: CATEGORICAL_HUES[0], values: totalValues, area: true, showEndLabel: true },
+    { key: "invertido", name: "Invertido", color: CATEGORICAL_HUES[2], values: investedValues, showEndLabel: true },
+    { key: "liquido", name: "Líquido", color: CATEGORICAL_HUES[3], values: cashValues, showEndLabel: true },
+  ];
+  // Solo se puede desglosar si en algún momento hubo dinero parado.
+  const hasCash = cashValues && cashValues.some((v) => v != null);
+  const available = hasCash ? allTotalSeries : [allTotalSeries[0]];
+
+  renderSeriesToggle(available);
+  const shown = available.filter((s) => totalSeriesVisible[s.key]);
 
   renderLineChart({
     svgEl: totalSvg,
     tooltipEl: totalTooltip,
+    legendEl: document.getElementById("chart-total-legend"),
     tableEl: totalTable,
     xValues: masterTs,
-    series: [{ name: "Valor total", color: CATEGORICAL_HUES[0], values: totalValues, area: true, showEndLabel: true }],
+    series: shown,
   });
 
   const nonEmpty = assetSeries.filter((s) => s.values.some((v) => v != null));
@@ -901,6 +1266,50 @@ function renderHistoryCharts() {
   buildDataTable(assetsTable, masterTs, tileSeries);
 
   renderProjectionChart();
+}
+
+const TOTAL_SERIES_KEY = "investmentTracker.totalSeries";
+
+function loadTotalSeriesVisible() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(TOTAL_SERIES_KEY));
+    if (raw && typeof raw === "object") return { total: !!raw.total, invertido: !!raw.invertido, liquido: !!raw.liquido };
+  } catch {
+    /* sin preferencia guardada */
+  }
+  return { total: true, invertido: true, liquido: true };
+}
+
+let totalSeriesVisible = loadTotalSeriesVisible();
+
+function renderSeriesToggle(available) {
+  const box = document.getElementById("total-series-toggle");
+  box.innerHTML = "";
+  // Con una sola serie disponible no hay nada que elegir.
+  if (available.length < 2) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+
+  const dark = isDarkMode();
+  available.forEach((s) => {
+    const active = !!totalSeriesVisible[s.key];
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "series-chip" + (active ? " active" : "");
+    btn.setAttribute("aria-pressed", active ? "true" : "false");
+    btn.innerHTML = `<span class="series-chip-dot" style="background:${dark ? s.color.dark : s.color.light}"></span>${s.name}`;
+    btn.addEventListener("click", () => {
+      const activos = available.filter((x) => totalSeriesVisible[x.key]);
+      // No se permite dejar el gráfico sin ninguna serie.
+      if (active && activos.length === 1) return;
+      totalSeriesVisible[s.key] = !active;
+      localStorage.setItem(TOTAL_SERIES_KEY, JSON.stringify(totalSeriesVisible));
+      renderHistoryCharts();
+    });
+    box.appendChild(btn);
+  });
 }
 
 function renderAssetGrid(gridEl, masterTs, tileSeries) {
@@ -1097,6 +1506,42 @@ function renderProjectionChart() {
     `Es una extrapolación lineal del histórico (incluye aportaciones pasadas, no solo rentabilidad) y no garantiza resultados futuros.`;
 }
 
+const RANGE_YEARS = { "1y": 1, "2y": 2, "5y": 5 };
+
+// Rejilla semanal común a todos los activos. Arranca en el movimiento más antiguo
+// (acotado por el rango elegido) y no solo donde empieza el histórico de Yahoo, que
+// para algunos fondos es mucho más corto que la posición real.
+function buildTimeGrid(holdingList, symbols, historyBySymbol, range) {
+  const WEEK = 7 * 24 * 3600;
+  const nowTs = Math.floor(Date.now() / 1000);
+
+  let earliest = Infinity;
+  let latest = 0;
+  symbols.forEach((sym) => {
+    const rec = historyBySymbol[sym];
+    if (!rec || rec.error || !rec.points.length) return;
+    earliest = Math.min(earliest, rec.points[0].t);
+    latest = Math.max(latest, rec.points[rec.points.length - 1].t);
+  });
+  holdingList.forEach((h) => {
+    movementPricePoints(h).forEach((p) => {
+      earliest = Math.min(earliest, p.t);
+    });
+  });
+
+  if (!Number.isFinite(earliest)) return [];
+
+  const years = RANGE_YEARS[range];
+  if (years) earliest = Math.max(earliest, nowTs - years * 365.25 * 24 * 3600);
+  const end = Math.max(latest, nowTs);
+  if (end <= earliest) return [earliest];
+
+  const grid = [];
+  for (let t = earliest; t <= end; t += WEEK) grid.push(t);
+  if (grid[grid.length - 1] < end) grid.push(end);
+  return grid;
+}
+
 async function loadPortfolioHistory() {
   const statusEl = document.getElementById("history-status");
   const btn = document.getElementById("history-refresh-btn");
@@ -1122,15 +1567,7 @@ async function loadPortfolioHistory() {
     const fxRec = historyBySymbol["EURUSD=X"];
     const fxPoints = fxRec && fxRec.points.length ? fxRec.points : null;
 
-    let masterTs = [];
-    let maxLen = 0;
-    symbols.forEach((sym) => {
-      const rec = historyBySymbol[sym];
-      if (rec && !rec.error && rec.points.length > maxLen) {
-        maxLen = rec.points.length;
-        masterTs = rec.points.map((p) => p.t);
-      }
-    });
+    const masterTs = buildTimeGrid(holdings, symbols, historyBySymbol, range);
 
     if (masterTs.length === 0) {
       statusEl.textContent = "No se pudo cargar el histórico de precios.";
@@ -1144,7 +1581,15 @@ async function loadPortfolioHistory() {
       values: buildAlignedSeries(h, masterTs, historyBySymbol, fxPoints),
     }));
 
-    const totalValues = masterTs.map((_, i) => {
+    // Liquidez en cada fecha: al vender, el dinero no desaparece de la cartera, se queda
+    // parado en la cuenta. Sin esto el total muestra una caída falsa el día de la venta.
+    const cashPoints = currentCashPoints();
+    const cashValues = masterTs.map((ts) => {
+      const bal = cashBalanceAt(cashPoints, ts);
+      return bal > 0.005 ? bal : null;
+    });
+
+    const investedValues = masterTs.map((_, i) => {
       let sum = 0;
       let any = false;
       assetSeries.forEach(({ values }) => {
@@ -1156,12 +1601,19 @@ async function loadPortfolioHistory() {
       return any ? sum : null;
     });
 
+    const totalValues = masterTs.map((_, i) => {
+      if (investedValues[i] == null && cashValues[i] == null) return null;
+      return (investedValues[i] || 0) + (cashValues[i] || 0);
+    });
+
     const firstValidIdx = totalValues.findIndex((v) => v != null);
     const trimStart = firstValidIdx > 0 ? firstValidIdx : 0;
 
     lastPortfolioHistory = {
       masterTs: masterTs.slice(trimStart),
       totalValues: totalValues.slice(trimStart),
+      investedValues: investedValues.slice(trimStart),
+      cashValues: cashValues.slice(trimStart),
       assetSeries: assetSeries.map((s) => ({ holding: s.holding, values: s.values.slice(trimStart) })),
     };
 
@@ -1199,7 +1651,7 @@ document.getElementById("add-form").addEventListener("submit", (e) => {
     movements: [
       {
         id: crypto.randomUUID(),
-        fecha: new Date().toISOString().slice(0, 10),
+        fecha: toIsoDate(new Date()),
         kind: "compra",
         titulos: quantity,
         precioUnitario: buyPrice,
@@ -1226,6 +1678,13 @@ function parseEsNumber(str) {
   return Number.isNaN(n) ? null : n;
 }
 
+// Fecha local en formato YYYY-MM-DD. No se usa toISOString() porque convierte a UTC
+// y en husos por delante de Greenwich devuelve el día anterior.
+function toIsoDate(d) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 function parseEsDate(str) {
   const [d, m, y] = str.trim().split("/").map(Number);
   if (!d || !m || !y) return new Date(0);
@@ -1247,6 +1706,9 @@ function parseMovementsCsv(text) {
       titulos: parseEsNumber(f[7]) || 0,
       precioUnitario: parseEsNumber(f[8]) || 0,
       titulosNetos: parseEsNumber(f[12]) || 0,
+      importeEur: parseEsNumber(f[11]),
+      // ISIN del otro lado de un traspaso; vacío en compras, ventas y reembolsos normales
+      contrapartida: (f[15] || "").trim(),
     };
   });
   rows.sort((a, b) => a.fecha - b.fecha);
@@ -1284,17 +1746,19 @@ function consolidatePositions(rows) {
 
     pos.movements.push({
       id: crypto.randomUUID(),
-      fecha: row.fecha.toISOString().slice(0, 10),
+      fecha: toIsoDate(row.fecha),
       kind,
       titulos: Math.abs(row.titulos),
       precioUnitario: row.precioUnitario,
       divisa: row.divisa,
+      importeEur: row.importeEur,
+      contrapartida: row.contrapartida,
     });
   }
 
   return [...state.values()].map((pos) => {
-    const { qty, costNative } = replayMovements(pos.movements);
-    return { ...pos, qty, costNative };
+    const { qty, costNative, costEUR, realizedEUR } = replayMovements(pos.movements);
+    return { ...pos, qty, costNative, costEUR, realizedEUR };
   });
 }
 
@@ -1329,30 +1793,41 @@ document.getElementById("csv-import-btn").addEventListener("click", async () => 
   const positions = consolidatePositions(rows);
   const open = positions.filter((p) => p.qty > 0.0001);
   const closed = positions.filter((p) => p.qty <= 0.0001);
+  const realizadoTotal = positions.reduce((s, p) => s + (p.realizedEUR || 0), 0);
 
-  logImport(`${open.length} posiciones abiertas, ${closed.length} cerradas (ignoradas).`);
+  logImport(
+    `${open.length} posiciones abiertas, ${closed.length} cerradas ` +
+      `(se conservan por su ganancia realizada: ${fmtMoney(realizadoTotal)}).`
+  );
 
-  const resolved = await resolveIsins(open.map((p) => p.isin));
+  // Se resuelven también las cerradas: su histórico sigue contando para la evolución
+  // de la cartera en las fechas en que sí las tenías.
+  const resolved = await resolveIsins(positions.map((p) => p.isin));
 
   let added = 0;
   let updated = 0;
   const unresolved = [];
 
-  for (const pos of open) {
+  for (const pos of positions) {
     const match = resolved[pos.isin];
     const symbol = match && match.symbol ? match.symbol : pos.isin;
-    if (!match || !match.symbol) unresolved.push(`${pos.isin} (${pos.name})`);
+    if ((!match || !match.symbol) && pos.qty > 0.0001) unresolved.push(`${pos.isin} (${pos.name})`);
 
     const existing = holdings.find((h) => h.isin === pos.isin);
+    const keepManualSymbol = existing && existing.symbolManual && existing.symbol;
     const record = {
       id: existing ? existing.id : crypto.randomUUID(),
       isin: pos.isin,
-      symbol,
+      symbol: keepManualSymbol ? existing.symbol : symbol,
+      symbolManual: !!keepManualSymbol,
       name: pos.name,
       type: pos.type,
       currency: pos.currency,
       quantity: pos.qty,
-      avgCostNative: pos.costNative / pos.qty,
+      avgCostNative: pos.qty > 0.0001 ? pos.costNative / pos.qty : 0,
+      costEUR: pos.costEUR,
+      realizedEUR: pos.realizedEUR,
+      closed: pos.qty <= 0.0001,
       lastPrice: null,
       quoteError: null,
       movements: pos.movements,
@@ -1367,14 +1842,8 @@ document.getElementById("csv-import-btn").addEventListener("click", async () => 
     }
   }
 
-  // quita posiciones que el archivo dice que quedaron en 0 (ventas/reembolsos totales)
-  const closedIsins = new Set(closed.map((p) => p.isin));
-  const before = holdings.length;
-  holdings = holdings.filter((h) => !h.isin || !closedIsins.has(h.isin));
-  const removed = before - holdings.length;
-
   saveHoldings(holdings);
-  logImport(`Importación completa: ${added} nuevas, ${updated} actualizadas, ${removed} cerradas eliminadas.`);
+  logImport(`Importación completa: ${added} nuevas, ${updated} actualizadas.`);
   if (unresolved.length) {
     logImport(`No se pudo resolver el ticker de: ${unresolved.join(", ")}. Editá el símbolo manualmente si hace falta.`);
   }
@@ -1383,6 +1852,40 @@ document.getElementById("csv-import-btn").addEventListener("click", async () => 
   refreshPrices();
   loadPortfolioHistory();
 });
+
+function initPrivateToggle() {
+  const btn = document.getElementById("private-toggle");
+  const paint = () => {
+    btn.textContent = privateMode ? "Mostrar importes" : "Ocultar importes";
+    btn.setAttribute("aria-pressed", privateMode ? "true" : "false");
+    btn.classList.toggle("active", privateMode);
+  };
+  paint();
+  btn.addEventListener("click", () => {
+    setPrivateMode(!privateMode);
+    paint();
+    render();
+    renderHistoryCharts();
+  });
+}
+
+function initCashTile() {
+  const input = document.getElementById("tile-cash");
+  const commit = () => {
+    const value = parseFloat(input.value);
+    if (Number.isNaN(value)) {
+      render();
+      return;
+    }
+    setCashBalance(value);
+    render();
+    loadPortfolioHistory();
+  };
+  input.addEventListener("change", commit);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") input.blur();
+  });
+}
 
 function initTabs() {
   const buttons = document.querySelectorAll(".tab-btn");
@@ -1400,6 +1903,8 @@ function initTabs() {
 }
 
 initTabs();
+initPrivateToggle();
+initCashTile();
 initAssetDetailModal();
 initHoldingsTableEvents();
 render();

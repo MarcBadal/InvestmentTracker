@@ -44,6 +44,29 @@ body {
 
 header {
   padding: 24px 32px 8px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.private-toggle {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border: 1px solid var(--baseline);
+  border-radius: 6px;
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+.private-toggle:hover { border-color: var(--series-1); color: var(--text-primary); }
+.private-toggle.active {
+  border-color: var(--series-1);
+  color: var(--text-primary);
+  font-weight: 600;
 }
 header h1 {
   font-size: 1.4rem;
@@ -86,7 +109,7 @@ main {
 
 .tiles {
   display: grid;
-  grid-template-columns: repeat(4, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
   margin-bottom: 24px;
 }
@@ -105,6 +128,30 @@ main {
   font-size: 1.4rem;
   font-variant-numeric: tabular-nums;
 }
+.tile-input {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 1.4rem;
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+  padding: 0 4px;
+  margin: 0 -4px;
+}
+.tile-input:hover { border-color: var(--baseline); }
+.tile-input:focus { border-color: var(--series-1); outline: none; }
+.tile-note {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+.mov-origin-static {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
 .tile .value.good { color: var(--success-text); }
 .tile .value.bad { color: var(--critical-text); }
 
@@ -264,6 +311,18 @@ td.remove button {
 }
 td.remove button:hover { color: var(--critical-text); }
 
+.badge-partial {
+  font-size: 0.65rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  border: 1px solid var(--baseline);
+  border-radius: 4px;
+  padding: 1px 4px;
+  vertical-align: middle;
+}
+
 .empty-state {
   color: var(--text-muted);
   font-size: 0.85rem;
@@ -397,6 +456,39 @@ td.remove button:hover { color: var(--critical-text); }
   color: var(--text-secondary);
   margin: 0 0 8px;
 }
+
+.series-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.series-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--baseline);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+.series-chip:hover { color: var(--text-primary); }
+.series-chip.active {
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
+  background: var(--page-plane);
+}
+.series-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  opacity: 0.35;
+}
+.series-chip.active .series-chip-dot { opacity: 1; }
 
 .line-chart-wrap {
   position: relative;

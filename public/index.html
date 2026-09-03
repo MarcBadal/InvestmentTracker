@@ -8,12 +8,16 @@
 </head>
 <body>
 <header>
-  <h1>Tracker de Inversiones</h1>
-  <p>Acciones, ETFs y fondos &mdash; datos guardados localmente en este navegador</p>
+  <div>
+    <h1>Tracker de Inversiones</h1>
+    <p>Acciones, ETFs y fondos &mdash; datos guardados localmente en este navegador</p>
+  </div>
+  <button type="button" id="private-toggle" class="private-toggle" aria-pressed="false">Ocultar importes</button>
 </header>
 <main>
   <div class="tabs" role="tablist">
     <button type="button" class="tab-btn active" id="tab-btn-cartera" data-tab="cartera" role="tab" aria-selected="true">Cartera</button>
+    <button type="button" class="tab-btn" id="tab-btn-cerradas" data-tab="cerradas" role="tab" aria-selected="false">Posiciones cerradas</button>
     <button type="button" class="tab-btn" id="tab-btn-proyeccion" data-tab="proyeccion" role="tab" aria-selected="false">Proyecci&oacute;n</button>
   </div>
 
@@ -28,8 +32,19 @@
       <div class="value" id="tile-current">&mdash;</div>
     </div>
     <div class="tile">
-      <div class="label">Ganancia / P&eacute;rdida</div>
+      <div class="label">Ganancia / P&eacute;rdida (latente)</div>
       <div class="value" id="tile-gain">&mdash;</div>
+    </div>
+    <div class="tile">
+      <div class="label">Ganancia realizada</div>
+      <div class="value" id="tile-realized">&mdash;</div>
+    </div>
+    <div class="tile">
+      <div class="label">Liquidez (sin invertir)</div>
+      <div class="value">
+        <input type="number" step="any" id="tile-cash" class="tile-input" aria-label="Liquidez actual en euros">
+      </div>
+      <div class="tile-note" id="cash-note"></div>
     </div>
     <div class="tile">
       <div class="label">Rendimiento</div>
@@ -127,10 +142,12 @@
     <h2>Evoluci&oacute;n de la cartera</h2>
     <div class="chart-block">
       <h3>Valor total</h3>
+      <div class="series-toggle" id="total-series-toggle"></div>
       <div class="line-chart-wrap" id="chart-total-wrap">
         <svg id="chart-total" viewBox="0 0 640 240" role="img" aria-label="Evoluci&oacute;n del valor total de la cartera"></svg>
         <div class="chart-tooltip" id="chart-total-tooltip" hidden></div>
       </div>
+      <div class="legend" id="chart-total-legend"></div>
       <details class="table-view">
         <summary>Ver como tabla</summary>
         <div id="chart-total-table"></div>
@@ -162,6 +179,48 @@
         <summary>Ver como tabla</summary>
         <div id="chart-asset-detail-table"></div>
       </details>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="tab-cerradas" role="tabpanel" hidden>
+    <section class="tiles">
+      <div class="tile">
+        <div class="label">Total recuperado</div>
+        <div class="value" id="tile-closed-received">&mdash;</div>
+      </div>
+      <div class="tile">
+        <div class="label">Invertido en ellas</div>
+        <div class="value" id="tile-closed-invested">&mdash;</div>
+      </div>
+      <div class="tile">
+        <div class="label">Ganancia realizada</div>
+        <div class="value" id="tile-closed-gain">&mdash;</div>
+      </div>
+      <div class="tile">
+        <div class="label">Rendimiento</div>
+        <div class="value" id="tile-closed-pct">&mdash;</div>
+      </div>
+    </section>
+
+    <div class="card">
+      <h2>Acciones, fondos y ETFs que ya no ten&eacute;s</h2>
+      <p class="chart-hint">Posiciones vendidas o reembolsadas por completo. Los traspasos entre fondos no cuentan como venta: no son dinero que saliste.</p>
+      <table id="closed-table">
+        <thead>
+          <tr>
+            <th>S&iacute;mbolo</th>
+            <th>Nombre</th>
+            <th>Tipo</th>
+            <th>Periodo</th>
+            <th>Invertido (EUR)</th>
+            <th>Recuperado (EUR)</th>
+            <th>Ganancia (EUR)</th>
+            <th>Rend.</th>
+          </tr>
+        </thead>
+        <tbody id="closed-body"></tbody>
+      </table>
+      <div class="empty-state" id="closed-empty" hidden>Todav&iacute;a no cerraste ninguna posici&oacute;n. Import&aacute; el CSV para que aparezcan las pasadas.</div>
     </div>
   </div>
 
