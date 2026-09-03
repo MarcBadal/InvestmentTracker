@@ -22,6 +22,14 @@
   </div>
 
   <div class="tab-panel" id="tab-cartera" role="tabpanel">
+  <div class="alert" id="quote-alert" hidden></div>
+
+  <section class="hero">
+    <div class="hero-label">Patrimonio total</div>
+    <div class="hero-value" id="hero-total">&mdash;</div>
+    <div class="hero-sub" id="hero-sub"></div>
+  </section>
+
   <section class="tiles" id="tiles">
     <div class="tile">
       <div class="label">Total invertido (EUR)</div>
@@ -59,9 +67,15 @@
         <button id="refresh-btn">Actualizar precios</button>
       </div>
       <h2>Mis posiciones</h2>
-      <form class="add-holding" id="add-form">
+      <details class="add-panel" id="add-panel">
+        <summary>Agregar posici&oacute;n manualmente</summary>
+        <form class="add-holding" id="add-form">
         <div>
-          <label for="f-symbol">S&iacute;mbolo</label>
+          <label for="f-alias">Nombre</label>
+          <input id="f-alias" name="alias" placeholder="Apple" autocomplete="off">
+        </div>
+        <div>
+          <label for="f-symbol">S&iacute;mbolo (ticker)</label>
           <input id="f-symbol" name="symbol" placeholder="AAPL" required autocomplete="off">
         </div>
         <div>
@@ -88,7 +102,8 @@
           </select>
         </div>
         <button type="submit">Agregar</button>
-      </form>
+        </form>
+      </details>
 
       <details class="import-panel" id="import-panel">
         <summary>Importar movimientos desde CSV</summary>
@@ -208,8 +223,8 @@
       <table id="closed-table">
         <thead>
           <tr>
-            <th>S&iacute;mbolo</th>
             <th>Nombre</th>
+            <th>S&iacute;mbolo</th>
             <th>Tipo</th>
             <th>Periodo</th>
             <th>Invertido (EUR)</th>

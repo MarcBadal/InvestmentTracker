@@ -15,7 +15,7 @@ from urllib.parse import urlparse, parse_qs
 PORT = 8765
 PUBLIC_DIR = Path(__file__).parent / "public"
 QUOTE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=1"
+SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=10"
 HISTORY_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={range}&interval={interval}"
 
 ALLOWED_RANGES = {"6mo", "1y", "2y", "5y", "10y", "max"}
@@ -64,6 +64,13 @@ def fetch_history(args: tuple[str, str, str]) -> dict:
 
 
 def resolve_isin(isin: str) -> dict:
+    """Devuelve todos los listados que Yahoo asocia al ISIN.
+
+    Se entregan como lista de candidatos (no solo el primero) porque el mismo fondo
+    cotiza en varias plazas y divisas, y porque la busqueda a veces cuela un
+    instrumento parecido pero distinto: quien llama decide cual encaja comparando
+    el precio con el de las operaciones reales.
+    """
     if isin in _resolve_cache:
         return _resolve_cache[isin]
     url = SEARCH_URL.format(query=urllib.parse.quote(isin))
@@ -72,18 +79,27 @@ def resolve_isin(isin: str) -> dict:
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         quotes = data.get("quotes") or []
-        if not quotes:
-            result = {"isin": isin, "symbol": None, "name": None, "error": "sin coincidencias"}
-        else:
-            q = quotes[0]
-            result = {
-                "isin": isin,
+        candidates = [
+            {
                 "symbol": q.get("symbol"),
                 "name": q.get("shortname") or q.get("longname") or q.get("symbol"),
+                "exchange": q.get("exchDisp") or q.get("exchange"),
+            }
+            for q in quotes
+            if q.get("symbol")
+        ]
+        if not candidates:
+            result = {"isin": isin, "symbol": None, "name": None, "candidates": [], "error": "sin coincidencias"}
+        else:
+            result = {
+                "isin": isin,
+                "symbol": candidates[0]["symbol"],
+                "name": candidates[0]["name"],
+                "candidates": candidates,
                 "error": None,
             }
     except Exception as exc:  # noqa: BLE001
-        result = {"isin": isin, "symbol": None, "name": None, "error": str(exc)}
+        result = {"isin": isin, "symbol": None, "name": None, "candidates": [], "error": str(exc)}
     _resolve_cache[isin] = result
     return result
 

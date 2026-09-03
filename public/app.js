@@ -26,6 +26,9 @@ const MOVEMENT_TYPES = {
 function replayMovements(movements) {
   let qty = 0;
   let costNative = 0;
+  // Igual que costNative pero con las comisiones incluidas: es la base sobre la que el
+  // broker calcula el % de cada posición.
+  let costNativeGross = 0;
   // Coste en EUR realmente pagado (importe_neto_eur del CSV): incluye comisiones y usa
   // el tipo de cambio del día de la operación, no el de hoy.
   let costEUR = 0;
@@ -50,6 +53,7 @@ function replayMovements(movements) {
       qty += m.titulos;
       if (!arrastra) {
         costNative += m.titulos * m.precioUnitario;
+        costNativeGross += m.titulos * m.precioUnitario + (m.comision || 0);
         if (m.importeEur != null) costEUR += m.importeEur;
         else hasEur = false;
       }
@@ -57,6 +61,7 @@ function replayMovements(movements) {
       const removeQty = Math.min(m.titulos, qty);
       if (!traspaso) {
         const avgNative = costNative / qty;
+        const avgGross = costNativeGross / qty;
         const avgEUR = costEUR / qty;
         // Ganancia realizada: lo cobrado por la venta menos el coste medio de lo vendido.
         if (m.importeEur != null) {
@@ -64,12 +69,13 @@ function replayMovements(movements) {
           realizedEUR += cobradoEUR - avgEUR * removeQty;
         }
         costNative -= avgNative * removeQty;
+        costNativeGross -= avgGross * removeQty;
         costEUR -= avgEUR * removeQty;
       }
       qty -= removeQty;
     }
   }
-  return { qty, costNative, costEUR: hasEur ? costEUR : null, realizedEUR };
+  return { qty, costNative, costNativeGross, costEUR: hasEur ? costEUR : null, realizedEUR };
 }
 
 const CATEGORICAL_HUES = [
@@ -84,9 +90,10 @@ const CATEGORICAL_HUES = [
 ];
 
 function recomputeHolding(h) {
-  const { qty, costNative, costEUR, realizedEUR } = replayMovements(h.movements);
+  const { qty, costNative, costNativeGross, costEUR, realizedEUR } = replayMovements(h.movements);
   h.quantity = qty;
   h.avgCostNative = qty > 0 ? costNative / qty : 0;
+  h.costNativeGross = costNativeGross;
   h.costEUR = costEUR;
   h.realizedEUR = realizedEUR;
   h.closed = qty <= 0.0001;
@@ -155,6 +162,13 @@ function fmtPct(n) {
   return `${sign}${n.toFixed(2)}%`;
 }
 
+// Etiqueta visible de una posición. El símbolo es el ticker que se le pide a Yahoo
+// (fontanería); lo que se muestra es el alias que pone el usuario, o el nombre del
+// instrumento, y solo se cae al ticker si no hay nada mejor.
+function holdingLabel(h) {
+  return h.alias || h.name || h.symbol;
+}
+
 function isDarkMode() {
   return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
 }
@@ -173,14 +187,28 @@ function toEUR(amountNative, currency) {
 
 function computeRow(h) {
   const currency = h.currency || "USD";
-  const price = h.lastPrice ?? h.avgCostNative ?? h.buyPrice;
+  // Sin cotización, o con una que es de otro instrumento (símbolo mal resuelto): se
+  // estima con el coste medio y se marca, en vez de mostrar una cifra disparatada.
+  const stalePrice = h.lastPrice == null || quoteLooksWrong(h, h.lastPrice);
+  const price = (stalePrice ? null : h.lastPrice) ?? h.avgCostNative ?? h.buyPrice;
   const avgCostNative = h.avgCostNative ?? h.buyPrice;
   const marketValueNative = h.quantity * price;
   const marketValueEUR = toEUR(marketValueNative, currency);
   const costEUR = h.costEUR != null ? h.costEUR : toEUR(h.quantity * avgCostNative, currency);
   const gainEUR = marketValueEUR - costEUR;
   const gainPct = costEUR > 0 ? (gainEUR / costEUR) * 100 : 0;
-  return { ...h, currency, price, avgCostNative, marketValueNative, marketValueEUR, costEUR, gainEUR, gainPct };
+
+  // Rendimiento en la divisa de la posición, que es como lo calcula el broker: sin el
+  // efecto del tipo de cambio. En EUR el resultado es el mismo; en dólares no, porque
+  // ahí se suma cuánto se movió el euro desde que compraste.
+  const costNativeGross = h.costNativeGross > 0 ? h.costNativeGross : h.quantity * avgCostNative;
+  const gainNative = marketValueNative - costNativeGross;
+  const gainPctNative = costNativeGross > 0 ? (gainNative / costNativeGross) * 100 : 0;
+
+  return {
+    ...h, currency, price, avgCostNative, marketValueNative, marketValueEUR,
+    costEUR, gainEUR, gainPct, costNativeGross, gainNative, gainPctNative, stalePrice,
+  };
 }
 
 function renderTiles(rows, realized = 0, cash = 0) {
@@ -188,6 +216,19 @@ function renderTiles(rows, realized = 0, cash = 0) {
   const current = rows.reduce((s, r) => s + r.marketValueEUR, 0);
   const gain = current - invested;
   const gainPct = invested > 0 ? (gain / invested) * 100 : 0;
+
+  // Cajita grande: lo que realmente tenés, invertido más lo que está parado en la cuenta.
+  const patrimonioTotal = current + cash;
+  const acumulada = gain + realized;
+  const baseAcum = invested > 0 ? invested : 0;
+  document.getElementById("hero-total").textContent = fmtMoney(patrimonioTotal);
+  const sub = document.getElementById("hero-sub");
+  sub.innerHTML =
+    `<span>${fmtMoney(current)} invertido</span>` +
+    `<span>${fmtMoney(cash)} l&iacute;quido</span>` +
+    `<span class="${acumulada >= 0 ? "good" : "bad"}">${acumulada >= 0 ? "▲" : "▼"} ${fmtMoney(
+      Math.abs(acumulada)
+    )} acumulado${baseAcum > 0 ? ` (${fmtPct((acumulada / baseAcum) * 100)})` : ""}</span>`;
 
   document.getElementById("tile-invested").textContent = fmtMoney(invested);
   document.getElementById("tile-current").textContent = fmtMoney(current);
@@ -261,6 +302,7 @@ function renderMovementsPanel(holding) {
 
   return `
     <div class="movements-panel" data-holding-id="${holding.id}">
+      ${identityBlock(holding)}
       <table class="movements-table">
         <thead>
           <tr><th>Fecha</th><th>Operaci&oacute;n</th><th>T&iacute;tulos</th><th>Precio unitario (${holding.currency})</th><th>Origen del dinero</th><th></th></tr>
@@ -270,6 +312,31 @@ function renderMovementsPanel(holding) {
       <button type="button" class="mov-add">+ A&ntilde;adir movimiento</button>
     </div>
   `;
+}
+
+// Identificación técnica de la posición: aquí vive el ticker que se le pide a Yahoo y el
+// ISIN. Va dentro del desplegable para no ensuciar la tabla, que muestra el nombre.
+function identityBlock(h) {
+  const cotiza = h.quoteError
+    ? `<span class="identity-bad">⚠ ${h.quoteError}</span>`
+    : h.quoteName
+      ? `Cotiza como: ${h.quoteName}${h.quoteCurrency ? ` (${h.quoteCurrency})` : ""}`
+      : "";
+  return `
+    <div class="identity-block">
+      <label class="identity-field">
+        <span>S&iacute;mbolo (ticker)</span>
+        <input type="text" class="mov-symbol" value="${h.symbol || ""}" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="identity-field">
+        <span>ISIN</span>
+        <input type="text" class="mov-isin" value="${h.isin || ""}" autocomplete="off" spellcheck="false"
+               placeholder="IE00B4L5Y983">
+      </label>
+      <button type="button" class="isin-lookup">Buscar ticker por ISIN</button>
+      ${h.name ? `<div class="identity-field"><span>Nombre del CSV</span><code>${h.name}</code></div>` : ""}
+      ${cotiza ? `<p class="identity-quote">${cotiza}</p>` : ""}
+    </div>`;
 }
 
 // Selector de origen del dinero. Solo tiene sentido en las entradas: define si la compra
@@ -293,6 +360,23 @@ function movementOriginField(m) {
     </select>`;
 }
 
+// Celda de ganancia/pérdida. Se muestra en la divisa de la posición para que cuadre con
+// el broker; el equivalente en euros (que sí incluye el efecto divisa) va en el tooltip.
+function gainCell(r) {
+  if (r.stalePrice) {
+    return `<td class="gain" title="Sin cotización: no se puede calcular el rendimiento">—</td>`;
+  }
+  const positivo = r.gainNative >= 0;
+  const tip =
+    r.currency === "EUR"
+      ? ""
+      : ` title="En euros: ${fmtMoney(r.gainEUR)} (${fmtPct(r.gainPct)}), incluye el efecto del tipo de cambio"`;
+  return `<td class="gain ${positivo ? "good" : "bad"}"${tip}>${positivo ? "▲" : "▼"} ${fmtMoney(
+    Math.abs(r.gainNative),
+    r.currency
+  )} (${fmtPct(r.gainPctNative)})</td>`;
+}
+
 function renderTable(rows) {
   const body = document.getElementById("holdings-body");
   const emptyState = document.getElementById("empty-state");
@@ -312,8 +396,8 @@ function renderTable(rows) {
     const warn = tip ? ` title="${tip.replace(/"/g, "&quot;")}"` : "";
     const symbolField =
       editingSymbolId === r.id
-        ? `<input type="text" class="edit-symbol-input" data-id="${r.id}" value="${r.symbol}" autocomplete="off">`
-        : `${r.symbol}${r.quoteError ? " ⚠" : ""} <button class="edit-symbol" type="button" data-id="${r.id}" title="Editar s&iacute;mbolo">&#9998;</button>`;
+        ? `<input type="text" class="edit-symbol-input" data-id="${r.id}" value="${holdingLabel(r)}" autocomplete="off">`
+        : `${holdingLabel(r)}${r.quoteError ? " ⚠" : ""} <button class="edit-symbol" type="button" data-id="${r.id}" title="Cambiar el nombre que ves">&#9998;</button>`;
     tr.innerHTML = `
       <td class="symbol"${warn}><button class="toggle-movements" type="button" data-id="${r.id}">${expanded ? "▾" : "▸"}</button> ${symbolField}</td>
       <td>${r.type}</td>
@@ -322,7 +406,7 @@ function renderTable(rows) {
       <td>${fmtMoney(r.costEUR)}</td>
       <td>${fmtMoney(r.price, r.currency)}</td>
       <td>${fmtMoney(r.marketValueEUR)}</td>
-      <td class="gain ${r.gainEUR >= 0 ? "good" : "bad"}">${r.gainEUR >= 0 ? "▲" : "▼"} ${fmtMoney(Math.abs(r.gainEUR))} (${fmtPct(r.gainPct)})</td>
+      ${gainCell(r)}
       <td class="remove"><button class="remove-holding" title="Eliminar" data-id="${r.id}">✕</button></td>
     `;
     body.appendChild(tr);
@@ -344,6 +428,37 @@ function renderTable(rows) {
       input.select();
     }
   }
+}
+
+// Busca el ticker a partir del ISIN y se queda con el listado cuya cotización encaja con
+// lo que se pagó. Así basta con tener uno de los dos identificadores.
+async function resolveByIsin(holding, isin) {
+  holding.isin = isin;
+  const resolved = await resolveIsins([isin]);
+  const match = resolved[isin];
+  const candidatos = (match && match.candidates) || [];
+
+  if (!candidatos.length) {
+    holding.quoteError = `Yahoo no encuentra ningún listado para el ISIN ${isin}. Escribí el ticker a mano.`;
+    saveHoldings(holdings);
+    render();
+    return;
+  }
+
+  const elegido = await bestSymbolFor(candidatos, latestMovementPrice(holding), holding.currency || "EUR");
+  holding.symbol = elegido.symbol;
+  holding.symbolManual = true;
+  holding.lastPrice = null;
+  holding.quoteName = null;
+  holding.quoteError = elegido.verified
+    ? null
+    : `Se encontró ${elegido.symbol}, pero su cotización no encaja con lo que pagaste. ` +
+      `Candidatos: ${candidatos.map((c) => `${c.symbol}${c.exchange ? ` (${c.exchange})` : ""}`).join(", ")}.`;
+
+  saveHoldings(holdings);
+  render();
+  refreshPrices();
+  loadPortfolioHistory();
 }
 
 function initHoldingsTableEvents() {
@@ -372,6 +487,21 @@ function initHoldingsTableEvents() {
     if (editSymbolBtn) {
       editingSymbolId = editSymbolBtn.dataset.id;
       render();
+      return;
+    }
+
+    const lookupBtn = e.target.closest(".isin-lookup");
+    if (lookupBtn) {
+      const panel = lookupBtn.closest(".movements-panel");
+      const holding = holdings.find((h) => h.id === panel.dataset.holdingId);
+      const isin = (panel.querySelector(".mov-isin").value || "").trim().toUpperCase();
+      if (!holding || !isin) return;
+      lookupBtn.disabled = true;
+      lookupBtn.textContent = "Buscando…";
+      resolveByIsin(holding, isin).finally(() => {
+        lookupBtn.disabled = false;
+        lookupBtn.textContent = "Buscar ticker por ISIN";
+      });
       return;
     }
 
@@ -408,6 +538,27 @@ function initHoldingsTableEvents() {
   body.addEventListener("change", (e) => {
     const panel = e.target.closest(".movements-panel");
     if (!panel) return;
+
+    // El ticker vive fuera de la tabla de movimientos, en el bloque de identificación.
+    if (e.target.classList.contains("mov-symbol")) {
+      const holding = holdings.find((h) => h.id === panel.dataset.holdingId);
+      const nuevo = e.target.value.trim().toUpperCase();
+      if (!holding || !nuevo || nuevo === holding.symbol) {
+        render();
+        return;
+      }
+      holding.symbol = nuevo;
+      holding.symbolManual = true; // que una reimportación del CSV no lo pise
+      holding.lastPrice = null;
+      holding.quoteError = null;
+      holding.quoteName = null;
+      saveHoldings(holdings);
+      render();
+      refreshPrices();
+      loadPortfolioHistory();
+      return;
+    }
+
     const movRow = e.target.closest("tr[data-movement-id]");
     if (!movRow) return;
 
@@ -435,17 +586,15 @@ function initHoldingsTableEvents() {
       render();
       return;
     }
-    const newSymbol = input.value.trim().toUpperCase();
-    if (newSymbol && newSymbol !== holding.symbol) {
-      holding.symbol = newSymbol;
-      holding.symbolManual = true; // que una reimportación del CSV no lo pise
-      holding.lastPrice = null;
-      holding.quoteError = null;
+    // Solo cambia la etiqueta visible: el ticker que se consulta vive en el desplegable,
+    // así que aquí no hace falta volver a pedir precios.
+    const nuevo = input.value.trim();
+    if (nuevo && nuevo !== holdingLabel(holding)) {
+      holding.alias = nuevo;
       saveHoldings(holdings);
-      render();
-      refreshPrices();
-      loadPortfolioHistory();
-      return;
+    } else if (!nuevo && holding.alias) {
+      delete holding.alias; // vaciarlo devuelve el nombre original
+      saveHoldings(holdings);
     }
     render();
   }
@@ -670,6 +819,22 @@ function positionCashflows(h) {
   return { invertido, recuperado, desde: fechas[0], hasta: fechas[fechas.length - 1] };
 }
 
+// Aviso arriba del todo: sin cotización válida, el "Valor actual" y el rendimiento no son
+// de fiar, y eso no debería descubrirse mirando un ⚠ pequeño en una fila de la tabla.
+function renderQuoteAlert(rows) {
+  const el = document.getElementById("quote-alert");
+  const malas = rows.filter((r) => r.stalePrice);
+  if (!malas.length) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  el.innerHTML =
+    `<strong>${malas.length} ${malas.length === 1 ? "posición sin cotización válida" : "posiciones sin cotización válida"}:</strong> ` +
+    `${malas.map((r) => holdingLabel(r)).join(", ")}. Se están valorando a su coste medio, así que el valor actual ` +
+    `y el rendimiento están incompletos. Abrí la posición con ▸ y corregí el símbolo (ticker).`;
+}
+
 function renderClosedPositions() {
   const body = document.getElementById("closed-body");
   const empty = document.getElementById("closed-empty");
@@ -696,8 +861,8 @@ function renderClosedPositions() {
 
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td class="symbol">${h.symbol}${h.closed ? "" : ' <span class="badge-partial">parcial</span>'}</td>
-      <td>${h.name || "—"}</td>
+      <td class="symbol">${holdingLabel(h)}${h.closed ? "" : ' <span class="badge-partial">parcial</span>'}</td>
+      <td><code class="ident">${h.symbol || "—"}</code></td>
       <td>${h.type || "—"}</td>
       <td>${fmtShortDate(desde)} → ${fmtShortDate(hasta)}</td>
       <td>${fmtMoney(invertido)}</td>
@@ -733,6 +898,7 @@ function render() {
   const rows = holdings.filter((h) => !h.closed).map(computeRow);
   const realized = holdings.reduce((s, h) => s + (h.realizedEUR || 0), 0);
   const cash = currentCash();
+  renderQuoteAlert(rows);
   renderTiles(rows, realized, cash);
   renderTable(rows);
   renderDonut(rows, cash);
@@ -773,6 +939,26 @@ function quantityAtDate(movements, cutoffMs) {
 // Precios tomados de los propios movimientos importados. Sirven de respaldo cuando
 // Yahoo no tiene histórico para esas fechas (típico en fondos: la clase nueva de
 // participaciones solo cotiza desde su creación, aunque la posición sea más antigua).
+// Precio de la operación más reciente, en la divisa de la posición. Sirve de referencia
+// para detectar cotizaciones de otro instrumento.
+function latestMovementPrice(holding) {
+  const pts = movementPricePoints(holding);
+  return pts.length ? pts[pts.length - 1].close : null;
+}
+
+// Un ISIN mal resuelto puede devolver la cotización de otra empresa (le pasó al fondo
+// MSCI World, que Yahoo resolvió a MSCI Inc.: 570 US$ frente a 12 € reales, inflando la
+// cartera a casi un millón). Ningún instrumento se mueve 10x desde tu última operación,
+// así que si eso pasa se rechaza el precio en vez de mostrar una cifra falsa.
+const QUOTE_SANITY_RATIO = 10;
+
+function quoteLooksWrong(holding, price) {
+  const ref = latestMovementPrice(holding);
+  if (!ref || ref <= 0 || !price || price <= 0) return false;
+  const ratio = price / ref;
+  return ratio > QUOTE_SANITY_RATIO || ratio < 1 / QUOTE_SANITY_RATIO;
+}
+
 function movementPricePoints(holding) {
   return (holding.movements || [])
     .filter((m) => m.precioUnitario > 0 && m.fecha)
@@ -1190,6 +1376,18 @@ async function refreshPrices() {
       if (price == null) {
         return { ...h, quoteError: `cotización en ${q.currency}, no se pudo convertir a ${h.currency}` };
       }
+      if (quoteLooksWrong(h, price)) {
+        const ref = latestMovementPrice(h);
+        return {
+          ...h,
+          lastPrice: null,
+          quoteName: q.name,
+          quoteCurrency: q.currency,
+          quoteError:
+            `${h.symbol} cotiza a ${fmtMoney(price, h.currency)} pero tu última operación fue a ` +
+            `${fmtMoney(ref, h.currency)}. Parece otro instrumento («${q.name}»): corregí el símbolo con ✎.`,
+        };
+      }
       // No se pisa h.name (el del CSV): se guarda aparte el nombre de lo que realmente
       // cotiza el ticker, para poder detectar un ISIN resuelto al instrumento equivocado.
       return { ...h, lastPrice: price, name: h.name || q.name, quoteName: q.name, quoteCurrency: q.currency, quoteError: null };
@@ -1256,7 +1454,7 @@ function renderHistoryCharts() {
 
   const nonEmpty = assetSeries.filter((s) => s.values.some((v) => v != null));
   const tileSeries = nonEmpty.map((s, i) => ({
-    name: s.holding.symbol,
+    name: holdingLabel(s.holding),
     color: CATEGORICAL_HUES[i % CATEGORICAL_HUES.length],
     values: s.values,
     area: true,
@@ -1640,9 +1838,13 @@ document.getElementById("add-form").addEventListener("submit", (e) => {
   const buyPrice = parseFloat(form.buyPrice.value);
   const currency = form.currency.value;
 
+  const alias = form.alias.value.trim();
+
   holdings.push({
     id: crypto.randomUUID(),
     symbol,
+    symbolManual: true, // lo escribió el usuario: no lo pisa una reimportación
+    alias: alias || undefined,
     type: form.type.value,
     quantity,
     avgCostNative: buyPrice,
@@ -1705,6 +1907,9 @@ function parseMovementsCsv(text) {
       operacion: (f[6] || "").trim().toLowerCase(),
       titulos: parseEsNumber(f[7]) || 0,
       precioUnitario: parseEsNumber(f[8]) || 0,
+      // Comisión en la divisa de la operación (no en EUR): el importe neto en divisa es
+      // titulos x precio + comision. Hace falta para que el % cuadre con el del broker.
+      comision: parseEsNumber(f[9]) || 0,
       titulosNetos: parseEsNumber(f[12]) || 0,
       importeEur: parseEsNumber(f[11]),
       // ISIN del otro lado de un traspaso; vacío en compras, ventas y reembolsos normales
@@ -1750,6 +1955,7 @@ function consolidatePositions(rows) {
       kind,
       titulos: Math.abs(row.titulos),
       precioUnitario: row.precioUnitario,
+      comision: row.comision,
       divisa: row.divisa,
       importeEur: row.importeEur,
       contrapartida: row.contrapartida,
@@ -1767,6 +1973,56 @@ async function resolveIsins(isins) {
   const res = await fetch(`/api/resolve?isins=${encodeURIComponent(isins.join(","))}`);
   const results = await res.json();
   return Object.fromEntries(results.map((r) => [r.isin, r]));
+}
+
+async function fetchQuotes(symbols) {
+  if (!symbols.length) return {};
+  const res = await fetch(`/api/quotes?symbols=${encodeURIComponent(symbols.join(","))}`);
+  const quotes = await res.json();
+  return Object.fromEntries(quotes.map((q) => [q.symbol, q]));
+}
+
+// Pasa una cotización a la divisa de la operación, para poder compararla con el precio
+// que se pagó realmente.
+function quoteInCurrency(q, currency, fx) {
+  if (q.price == null) return null;
+  if (!q.currency || q.currency === currency) return q.price;
+  if (!fx) return null;
+  if (currency === "EUR" && q.currency === "USD") return q.price / fx;
+  if (currency === "USD" && q.currency === "EUR") return q.price * fx;
+  return null;
+}
+
+// Elige, entre los listados que Yahoo asocia a un ISIN, el que de verdad corresponde a la
+// posición: el que cotiza a un precio coherente con la última operación registrada. Sin
+// esta comprobación se cuelan instrumentos parecidos pero distintos (el fondo MSCI World
+// resolviéndose a MSCI Inc., o el Silver Miners UCITS al ETF americano SIL).
+async function bestSymbolFor(candidates, refPrice, currency) {
+  const symbols = candidates.map((c) => c.symbol).filter(Boolean);
+  if (!symbols.length) return null;
+  if (!refPrice) return { symbol: symbols[0], verified: false };
+
+  const quotes = await fetchQuotes([...symbols, "EURUSD=X"]);
+  const fx = quotes["EURUSD=X"] && quotes["EURUSD=X"].price ? quotes["EURUSD=X"].price : fxRate;
+
+  let mejor = null;
+  let mejorClave = null;
+  for (const sym of symbols) {
+    const q = quotes[sym];
+    if (!q || q.price == null) continue;
+    const price = quoteInCurrency(q, currency, fx);
+    if (price == null || price <= 0) continue;
+    const ratio = price / refPrice;
+    if (ratio > QUOTE_SANITY_RATIO || ratio < 1 / QUOTE_SANITY_RATIO) continue;
+    // Entre los válidos gana el que cotiza en tu misma divisa (evita meter una conversión
+    // de más) y, a igualdad, el más cercano al último precio pagado.
+    const clave = [q.currency === currency ? 0 : 1, Math.abs(Math.log(ratio))];
+    if (!mejorClave || clave[0] < mejorClave[0] || (clave[0] === mejorClave[0] && clave[1] < mejorClave[1])) {
+      mejorClave = clave;
+      mejor = sym;
+    }
+  }
+  return mejor ? { symbol: mejor, verified: true } : { symbol: symbols[0], verified: false };
 }
 
 function logImport(msg) {
@@ -1808,10 +2064,23 @@ document.getElementById("csv-import-btn").addEventListener("click", async () => 
   let updated = 0;
   const unresolved = [];
 
+  const sinVerificar = [];
+
   for (const pos of positions) {
     const match = resolved[pos.isin];
-    const symbol = match && match.symbol ? match.symbol : pos.isin;
-    if ((!match || !match.symbol) && pos.qty > 0.0001) unresolved.push(`${pos.isin} (${pos.name})`);
+    const candidatos = (match && match.candidates) || (match && match.symbol ? [{ symbol: match.symbol }] : []);
+
+    // Se contrasta cada listado con el último precio pagado antes de aceptarlo.
+    const ultimoPrecio = [...pos.movements]
+      .filter((m) => m.precioUnitario > 0)
+      .sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)))
+      .map((m) => m.precioUnitario)
+      .pop();
+    const elegido = candidatos.length ? await bestSymbolFor(candidatos, ultimoPrecio, pos.currency) : null;
+
+    const symbol = elegido && elegido.symbol ? elegido.symbol : pos.isin;
+    if (!candidatos.length && pos.qty > 0.0001) unresolved.push(`${pos.isin} (${pos.name})`);
+    else if (elegido && !elegido.verified && pos.qty > 0.0001) sinVerificar.push(`${pos.name} → ${symbol}`);
 
     const existing = holdings.find((h) => h.isin === pos.isin);
     const keepManualSymbol = existing && existing.symbolManual && existing.symbol;
@@ -1845,7 +2114,13 @@ document.getElementById("csv-import-btn").addEventListener("click", async () => 
   saveHoldings(holdings);
   logImport(`Importación completa: ${added} nuevas, ${updated} actualizadas.`);
   if (unresolved.length) {
-    logImport(`No se pudo resolver el ticker de: ${unresolved.join(", ")}. Editá el símbolo manualmente si hace falta.`);
+    logImport(`No se pudo resolver el ticker de: ${unresolved.join(", ")}. Abrí la posición con ▸ y escribilo a mano.`);
+  }
+  if (sinVerificar.length) {
+    logImport(
+      `Ojo: no se pudo confirmar que estos tickers sean el instrumento correcto (su cotización no encaja con ` +
+        `lo que pagaste): ${sinVerificar.join(", ")}. Revisalos con ▸.`
+    );
   }
 
   render();
