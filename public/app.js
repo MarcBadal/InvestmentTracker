@@ -23,6 +23,18 @@ const MOVEMENT_TYPES = {
   transferencia_salida: { label: "Transferencia (salida)", tipo: "salida" },
 };
 
+// Coste de un movimiento en su divisa, comisiones incluidas: es la base sobre la que el
+// broker calcula el %. El importe neto del CSV ya las lleva, así que se prefiere y se pasa
+// a divisa con el tipo de cambio del día de la operación. Si falta (movimiento a mano, o
+// importado antes de guardar esos campos) se reconstruye con títulos x precio + comisión.
+function grossNativeOf(m) {
+  if (m.importeEur != null) {
+    if (m.tipoCambio > 0) return m.importeEur / m.tipoCambio;
+    if ((m.divisa || "EUR") === "EUR") return m.importeEur;
+  }
+  return m.titulos * m.precioUnitario + (m.comision || 0);
+}
+
 function replayMovements(movements) {
   let qty = 0;
   let costNative = 0;
@@ -53,7 +65,7 @@ function replayMovements(movements) {
       qty += m.titulos;
       if (!arrastra) {
         costNative += m.titulos * m.precioUnitario;
-        costNativeGross += m.titulos * m.precioUnitario + (m.comision || 0);
+        costNativeGross += grossNativeOf(m);
         if (m.importeEur != null) costEUR += m.importeEur;
         else hasEur = false;
       }
@@ -115,6 +127,58 @@ function ensureMovements(h) {
   return h.movements;
 }
 
+// Problemas que dejaron versiones anteriores en el almacenamiento y que hay que limpiar
+// antes de calcular nada, porque falsean todo el histórico.
+let sanitizeReport = [];
+
+function sanitizeHoldings(data) {
+  const avisos = [];
+
+  // 1) Movimientos con fecha imposible (los antiguos caían a 1 ene 1970 y hacían que sus
+  //    títulos contaran desde el principio del gráfico).
+  let malas = 0;
+  data.forEach((h) => {
+    const antes = (h.movements || []).length;
+    h.movements = (h.movements || []).filter((m) => validMovementDate(m.fecha));
+    malas += antes - h.movements.length;
+  });
+  if (malas) avisos.push(`${malas} movimiento(s) con fecha inválida descartados`);
+
+  // 2) Posiciones repetidas con el mismo ISIN: la importación solo actualizaba la primera
+  //    y la copia se seguía sumando al total y al gráfico.
+  const porIsin = new Map();
+  const fuera = [];
+  const limpio = [];
+  data.forEach((h) => {
+    if (!h.isin) {
+      limpio.push(h);
+      return;
+    }
+    const previa = porIsin.get(h.isin);
+    if (!previa) {
+      porIsin.set(h.isin, h);
+      limpio.push(h);
+      return;
+    }
+    // Se conserva la que tenga más historial; la otra se descarta entera.
+    const ganadora = (h.movements || []).length > (previa.movements || []).length ? h : previa;
+    const perdedora = ganadora === h ? previa : h;
+    limpio[limpio.indexOf(perdedora)] = ganadora;
+    porIsin.set(h.isin, ganadora);
+    fuera.push(perdedora.isin);
+  });
+  if (fuera.length) avisos.push(`${fuera.length} posición(es) duplicada(s) eliminada(s): ${[...new Set(fuera)].join(", ")}`);
+
+  // 3) Posiciones sin ningún movimiento utilizable.
+  const conDatos = limpio.filter((h) => (h.movements || []).length > 0 || (h.quantity ?? 0) > 0);
+  if (conDatos.length !== limpio.length) {
+    avisos.push(`${limpio.length - conDatos.length} posición(es) sin movimientos eliminada(s)`);
+  }
+
+  sanitizeReport = avisos;
+  return conDatos;
+}
+
 function loadHoldings() {
   let data;
   try {
@@ -122,10 +186,12 @@ function loadHoldings() {
   } catch {
     data = [];
   }
+  data = sanitizeHoldings(data);
   data.forEach((h) => {
     ensureMovements(h);
     recomputeHolding(h); // deja al día closed/realizedEUR/costEUR según los movimientos
   });
+  if (sanitizeReport.length) localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
   return data;
 }
 
@@ -150,10 +216,12 @@ function fmtMoney(n, currency = "EUR") {
   return n.toLocaleString("es-ES", { style: "currency", currency, maximumFractionDigits: 2 });
 }
 
-// Cantidades de títulos: también son un dato patrimonial, se ocultan igual.
+// Cantidades de títulos: también son un dato patrimonial, se ocultan igual. Se redondean
+// a 4 decimales para no arrastrar la basura del coma flotante (1990.2199999999998).
 function fmtQty(n) {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  return privateMode ? MASK : String(n);
+  if (privateMode) return MASK;
+  return Number(n.toFixed(4)).toLocaleString("es-ES", { maximumFractionDigits: 4 });
 }
 
 function fmtPct(n) {
@@ -824,6 +892,15 @@ function positionCashflows(h) {
 function renderQuoteAlert(rows) {
   const el = document.getElementById("quote-alert");
   const malas = rows.filter((r) => r.stalePrice);
+
+  if (sanitizeReport.length) {
+    el.hidden = false;
+    el.innerHTML =
+      `<strong>Se repararon datos guardados:</strong> ${sanitizeReport.join("; ")}. ` +
+      `Ven&iacute;an de versiones anteriores de la app y falseaban el hist&oacute;rico.`;
+    return;
+  }
+
   if (!malas.length) {
     el.hidden = true;
     return;
@@ -932,7 +1009,9 @@ function nearestPriceAtOrBefore(points, ts) {
 }
 
 function quantityAtDate(movements, cutoffMs) {
-  const relevant = movements.filter((m) => new Date(m.fecha).getTime() <= cutoffMs);
+  const relevant = movements.filter(
+    (m) => validMovementDate(m.fecha) && new Date(m.fecha).getTime() <= cutoffMs
+  );
   return replayMovements(relevant).qty;
 }
 
@@ -961,7 +1040,7 @@ function quoteLooksWrong(holding, price) {
 
 function movementPricePoints(holding) {
   return (holding.movements || [])
-    .filter((m) => m.precioUnitario > 0 && m.fecha)
+    .filter((m) => m.precioUnitario > 0 && validMovementDate(m.fecha))
     .map((m) => ({ t: Math.floor(new Date(m.fecha).getTime() / 1000), close: m.precioUnitario }))
     .sort((a, b) => a.t - b.t);
 }
@@ -972,14 +1051,17 @@ function movementPricePoints(holding) {
 // de Yahoo es de la clase nueva y en esa fecha aún se tenía la vieja.
 const SCALE_MISMATCH = 5;
 
-function priceAt(marketPoints, ownPoints, ts) {
+function priceAt(marketPoints, ownPoints, ts, mktToOwn = 1) {
   const mkt = marketPoints ? nearestPriceAtOrBefore(marketPoints, ts) : null;
   const own = ownPoints.length ? nearestPriceAtOrBefore(ownPoints, ts) : null;
   if (!mkt) return own ? own.close : null;
-  if (!own || !own.close) return mkt.close;
-  const ratio = mkt.close / own.close;
+  // mktToOwn lleva la cotización a la divisa de las operaciones: comparar un precio en
+  // dólares contra uno en euros daba falsos positivos y falsos negativos.
+  const mktPrice = mkt.close * mktToOwn;
+  if (!own || !own.close) return mktPrice;
+  const ratio = mktPrice / own.close;
   if (ratio > SCALE_MISMATCH || ratio < 1 / SCALE_MISMATCH) return own.close;
-  return mkt.close;
+  return mktPrice;
 }
 
 function buildAlignedSeries(holding, masterTs, historyBySymbol, fxPoints) {
@@ -988,10 +1070,19 @@ function buildAlignedSeries(holding, masterTs, historyBySymbol, fxPoints) {
   const ownPoints = movementPricePoints(holding);
   if (!marketPoints && !ownPoints.length) return masterTs.map(() => null);
   const currency = holding.currency || (rec && rec.currency) || "EUR";
+  const quoteCur = (rec && rec.currency) || currency;
   return masterTs.map((ts) => {
     const qty = quantityAtDate(holding.movements, ts * 1000);
     if (qty <= 0.0001) return null;
-    const price = priceAt(marketPoints, ownPoints, ts);
+    // Factor para expresar la cotización en la divisa de las operaciones antes de
+    // compararla con lo que se pagó.
+    let mktToOwn = 1;
+    if (quoteCur !== currency) {
+      const fxPt = fxPoints ? nearestPriceAtOrBefore(fxPoints, ts) : null;
+      if (!fxPt || !fxPt.close) return null;
+      mktToOwn = currency === "EUR" ? 1 / fxPt.close : fxPt.close;
+    }
+    const price = priceAt(marketPoints, ownPoints, ts, mktToOwn);
     if (price == null) return null;
     const valueNative = qty * price;
     if (currency === "EUR") return valueNative;
@@ -2082,6 +2173,25 @@ document.getElementById("add-form").addEventListener("submit", (e) => {
 
 document.getElementById("refresh-btn").addEventListener("click", refreshPrices);
 
+// Los datos guardados arrastran el formato de versiones anteriores (símbolos, comisiones,
+// traspasos, liquidez...). Cuando algo no cuadra, reimportar sobre datos viejos no basta:
+// hay que vaciar y reconstruir desde el CSV.
+document.getElementById("csv-reset-btn").addEventListener("click", () => {
+  const cuantas = holdings.length;
+  if (!confirm(`Se borrarán las ${cuantas} posiciones guardadas en este navegador y el ajuste de liquidez.\n\nTus archivos CSV no se tocan: podés volver a importarlos justo después.\n\n¿Seguir?`)) {
+    return;
+  }
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(CASH_ADJUST_KEY);
+  holdings = [];
+  cashAdjust = loadCashAdjust();
+  expandedIds.clear();
+  lastPortfolioHistory = null;
+  logImport(`Borradas ${cuantas} posiciones. Elegí el CSV y pulsá «Procesar archivo».`);
+  render();
+  renderHistoryCharts();
+});
+
 // ---------- Importador de CSV de movimientos ----------
 
 function parseEsNumber(str) {
@@ -2100,10 +2210,22 @@ function toIsoDate(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+// Devuelve null si la fecha no se entiende. Antes caía a new Date(0) (1 ene 1970), y ese
+// movimiento pasaba a contar desde el principio de los tiempos: sus títulos aparecían en
+// todo el histórico, inflando el gráfico aunque el total de hoy saliera bien.
 function parseEsDate(str) {
-  const [d, m, y] = str.trim().split("/").map(Number);
-  if (!d || !m || !y) return new Date(0);
-  return new Date(y, m - 1, d);
+  const [d, m, y] = String(str).trim().split("/").map(Number);
+  if (!d || !m || !y || y < 1990 || m > 12 || d > 31) return null;
+  const fecha = new Date(y, m - 1, d);
+  return Number.isNaN(fecha.getTime()) ? null : fecha;
+}
+
+// Misma comprobación para lo que ya está guardado: un movimiento con fecha imposible se
+// ignora en vez de contaminar todas las series históricas.
+function validMovementDate(fecha) {
+  if (!fecha) return false;
+  const t = new Date(fecha).getTime();
+  return !Number.isNaN(t) && t > Date.UTC(1990, 0, 1);
 }
 
 function parseMovementsCsv(text) {
@@ -2123,6 +2245,9 @@ function parseMovementsCsv(text) {
       // Comisión en la divisa de la operación (no en EUR): el importe neto en divisa es
       // titulos x precio + comision. Hace falta para que el % cuadre con el del broker.
       comision: parseEsNumber(f[9]) || 0,
+      // EUR por 1 unidad de la divisa: convierte el importe neto en euros a la divisa
+      // original sin depender de la comisión por separado.
+      tipoCambio: parseEsNumber(f[10]),
       titulosNetos: parseEsNumber(f[12]) || 0,
       importeEur: parseEsNumber(f[11]),
       // ISIN del otro lado de un traspaso; vacío en compras, ventas y reembolsos normales
@@ -2145,9 +2270,14 @@ function classifyMovementKind(row) {
 
 function consolidatePositions(rows) {
   const state = new Map();
+  const sinFecha = [];
 
   for (const row of rows) {
     if (!row.isin || row.titulos === 0) continue; // sin titulos: ordenes pendientes, se ignoran
+    if (!row.fecha) {
+      sinFecha.push(row.isin); // fecha ilegible: se descarta, no se inventa
+      continue;
+    }
 
     if (!state.has(row.isin)) {
       state.set(row.isin, {
@@ -2169,15 +2299,23 @@ function consolidatePositions(rows) {
       titulos: Math.abs(row.titulos),
       precioUnitario: row.precioUnitario,
       comision: row.comision,
+      tipoCambio: row.tipoCambio,
       divisa: row.divisa,
       importeEur: row.importeEur,
       contrapartida: row.contrapartida,
     });
   }
 
+  if (sinFecha.length) {
+    logImport(
+      `Descartados ${sinFecha.length} movimientos con fecha ilegible (${[...new Set(sinFecha)].join(", ")}). ` +
+        `Sin fecha no se puede saber cuándo tenías esos títulos.`
+    );
+  }
+
   return [...state.values()].map((pos) => {
-    const { qty, costNative, costEUR, realizedEUR } = replayMovements(pos.movements);
-    return { ...pos, qty, costNative, costEUR, realizedEUR };
+    const { qty, costNative, costNativeGross, costEUR, realizedEUR } = replayMovements(pos.movements);
+    return { ...pos, qty, costNative, costNativeGross, costEUR, realizedEUR };
   });
 }
 
@@ -2307,6 +2445,7 @@ document.getElementById("csv-import-btn").addEventListener("click", async () => 
       currency: pos.currency,
       quantity: pos.qty,
       avgCostNative: pos.qty > 0.0001 ? pos.costNative / pos.qty : 0,
+      costNativeGross: pos.costNativeGross,
       costEUR: pos.costEUR,
       realizedEUR: pos.realizedEUR,
       closed: pos.qty <= 0.0001,
@@ -2324,8 +2463,13 @@ document.getElementById("csv-import-btn").addEventListener("click", async () => 
     }
   }
 
+  // Red de seguridad: si quedó cualquier duplicado por ISIN de importaciones anteriores,
+  // se elimina aquí en vez de arrastrarlo al gráfico.
+  holdings = sanitizeHoldings(holdings);
+  sanitizeReport.forEach((a) => logImport(`Limpieza: ${a}.`));
+
   saveHoldings(holdings);
-  logImport(`Importación completa: ${added} nuevas, ${updated} actualizadas.`);
+  logImport(`Importación completa: ${added} nuevas, ${updated} actualizadas, ${holdings.length} en total.`);
   if (unresolved.length) {
     logImport(`No se pudo resolver el ticker de: ${unresolved.join(", ")}. Abrí la posición con ▸ y escribilo a mano.`);
   }

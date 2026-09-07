@@ -342,6 +342,19 @@ form.add-holding button:hover { filter: brightness(1.08); }
   cursor: pointer;
   font-size: 0.85rem;
 }
+.danger-btn {
+  margin-left: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--critical-text);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--critical-text);
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-family: inherit;
+}
+.danger-btn:hover { background: var(--critical-text); color: #fff; }
+
 .import-log {
   white-space: pre-wrap;
   font-size: 0.78rem;

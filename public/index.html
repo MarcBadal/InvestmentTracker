@@ -111,6 +111,7 @@
         <p class="import-hint">Archivo con columnas separadas por <code>;</code>: fecha, isin, valor, tipo_activo, mercado, divisa, operacion, titulos, precio_unitario, comision_divisa, tipo_cambio_eur, importe_neto_eur, titulos_netos, flujo_eur, dinero_nuevo, contrapartida, nota. Se consolidan compras/ventas y suscripciones/reembolsos por ISIN y se resuelve el ticker autom&aacute;ticamente.</p>
         <input type="file" id="csv-file" accept=".csv,text/csv">
         <button type="button" id="csv-import-btn">Procesar archivo</button>
+        <button type="button" id="csv-reset-btn" class="danger-btn" title="Borra las posiciones guardadas en este navegador">Borrar todo y empezar de cero</button>
         <pre class="import-log" id="import-log"></pre>
       </details>
 
