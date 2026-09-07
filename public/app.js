@@ -452,11 +452,100 @@ function renderTable(rows) {
 
   emptyState.hidden = rows.length > 0;
 
+  renderGroupToggle();
+
+  // Agrupadas por tipo (con subtotal) o en una lista plana, según la preferencia.
+  const bloques = groupRows(rows);
+
+  bloques.forEach((bloque) => {
+    if (bloque.titulo) body.appendChild(groupHeaderRow(bloque));
+    bloque.rows.forEach((r) => renderHoldingRow(body, r));
+  });
+
+  if (editingSymbolId) {
+    const input = body.querySelector(`.edit-symbol-input[data-id="${editingSymbolId}"]`);
+    if (input) {
+      input.focus();
+      input.select();
+    }
+  }
+}
+
+const GROUP_KEY = "investmentTracker.groupByType";
+let groupByType = localStorage.getItem(GROUP_KEY) !== "0";
+
+// Orden fijo, el mismo que el donut, para que un tipo no cambie de sitio al añadir o
+// vender posiciones.
+const TYPE_ORDER = ["Acción", "ETF", "Fondo"];
+
+function groupRows(rows) {
+  if (!groupByType) return [{ titulo: null, rows }];
+  const porTipo = new Map();
   rows.forEach((r) => {
-    const expanded = expandedIds.has(r.id);
-    const tr = document.createElement("tr");
-    tr.className = "holding-row";
-    const tip = r.quoteError
+    const t = r.type || "Otros";
+    if (!porTipo.has(t)) porTipo.set(t, []);
+    porTipo.get(t).push(r);
+  });
+  const tipos = [...porTipo.keys()].sort((a, b) => {
+    const ia = TYPE_ORDER.indexOf(a);
+    const ib = TYPE_ORDER.indexOf(b);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib) || a.localeCompare(b);
+  });
+  return tipos.map((t) => {
+    const grupo = porTipo.get(t).sort((a, b) => b.marketValueEUR - a.marketValueEUR);
+    return {
+      titulo: t,
+      rows: grupo,
+      costEUR: grupo.reduce((s, r) => s + r.costEUR, 0),
+      valorEUR: grupo.reduce((s, r) => s + r.marketValueEUR, 0),
+    };
+  });
+}
+
+function groupHeaderRow(bloque) {
+  const gain = bloque.valorEUR - bloque.costEUR;
+  const pct = bloque.costEUR > 0 ? (gain / bloque.costEUR) * 100 : null;
+  const tr = document.createElement("tr");
+  tr.className = "group-row";
+  tr.innerHTML = `
+    <td colspan="4">${bloque.titulo} <span class="group-count">${bloque.rows.length}</span></td>
+    <td>${fmtMoney(bloque.costEUR)}</td>
+    <td></td>
+    <td>${fmtMoney(bloque.valorEUR)}</td>
+    <td class="gain ${gain >= 0 ? "good" : "bad"}">${gain >= 0 ? "▲" : "▼"} ${fmtMoney(Math.abs(gain))}${
+      pct == null ? "" : ` (${fmtPct(pct)})`
+    }</td>
+    <td></td>
+  `;
+  return tr;
+}
+
+function renderGroupToggle() {
+  const box = document.getElementById("group-toggle");
+  if (!box) return;
+  box.innerHTML = "";
+  [
+    ["Agrupar por tipo", true],
+    ["Lista", false],
+  ].forEach(([label, valor]) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "series-chip" + (groupByType === valor ? " active" : "");
+    btn.textContent = label;
+    btn.addEventListener("click", () => {
+      groupByType = valor;
+      localStorage.setItem(GROUP_KEY, valor ? "1" : "0");
+      render();
+    });
+    box.appendChild(btn);
+  });
+}
+
+function renderHoldingRow(body, r) {
+  const expanded = expandedIds.has(r.id);
+  const tr = document.createElement("tr");
+  tr.className = "holding-row";
+  const tip = r.quoteError
       ? `No se pudo actualizar el precio: ${r.quoteError}`
       : [r.name, r.quoteName ? `Cotiza como: ${r.quoteName} (${r.symbol}, ${r.quoteCurrency || "?"})` : null]
           .filter(Boolean)
@@ -484,18 +573,9 @@ function renderTable(rows) {
     movTr.hidden = !expanded;
     const td = document.createElement("td");
     td.colSpan = 9;
-    td.innerHTML = renderMovementsPanel(r);
-    movTr.appendChild(td);
-    body.appendChild(movTr);
-  });
-
-  if (editingSymbolId) {
-    const input = body.querySelector(`.edit-symbol-input[data-id="${editingSymbolId}"]`);
-    if (input) {
-      input.focus();
-      input.select();
-    }
-  }
+  td.innerHTML = renderMovementsPanel(r);
+  movTr.appendChild(td);
+  body.appendChild(movTr);
 }
 
 // Busca el ticker a partir del ISIN y se queda con el listado cuya cotización encaja con
@@ -1521,7 +1601,20 @@ function renderHistoryCharts() {
     return;
   }
 
-  const { masterTs, totalValues, investedValues, cashValues, assetSeries } = lastPortfolioHistory;
+  // El selector de rango solo recorta lo que se dibuja: los datos completos se conservan
+  // para el desglose por año, que necesita también los ejercicios antiguos.
+  const full = lastPortfolioHistory;
+  const years = RANGE_YEARS[document.getElementById("history-range").value];
+  const desde = years ? Math.floor(Date.now() / 1000) - years * 365.25 * 24 * 3600 : -Infinity;
+  const corte = full.masterTs.findIndex((t) => t >= desde);
+  const from = corte > 0 ? corte : 0;
+  const cut = (arr) => (arr ? arr.slice(from) : arr);
+
+  const masterTs = cut(full.masterTs);
+  const totalValues = cut(full.totalValues);
+  const investedValues = cut(full.investedValues);
+  const cashValues = cut(full.cashValues);
+  const assetSeries = full.assetSeries.map((s) => ({ holding: s.holding, values: cut(s.values) }));
 
   const allTotalSeries = [
     { key: "total", name: "Total (invertido + líquido)", color: CATEGORICAL_HUES[0], values: totalValues, area: true, showEndLabel: true },
@@ -1724,6 +1817,9 @@ function availableYears() {
 function periodBreakdown(startTs, endTs) {
   if (!lastPortfolioHistory) return null;
   const { masterTs, assetSeries } = lastPortfolioHistory;
+  // Periodo anterior a los datos disponibles: no se puede saber cuánto valía al final, y
+  // tomarlo como 0 daría un -100% falso (las aportaciones sí constan en los movimientos).
+  if (!masterTs.length || endTs < masterTs[0]) return { rows: [], total: {}, vacio: true };
 
   const rows = assetSeries
     .map(({ holding, values }) => {
@@ -1772,6 +1868,223 @@ function monthRange(year, month) {
   return { start, end, futuro: start > NOW_TS(), enCurso: end >= NOW_TS() && start <= NOW_TS() };
 }
 
+// Rendimiento del índice en el mismo periodo, con la misma convención de límites que la
+// cartera (el valor de partida es el de justo antes de empezar) para que sean comparables.
+function benchmarkReturn(startTs, endTs) {
+  const pts = lastPortfolioHistory && lastPortfolioHistory.benchPoints;
+  if (!pts) return null;
+  const a = nearestPriceAtOrBefore(pts, startTs - 1);
+  const b = nearestPriceAtOrBefore(pts, endTs);
+  if (!a || !b || !(a.close > 0)) return null;
+  return (b.close / a.close - 1) * 100;
+}
+
+// Rendimiento mensual tuyo y del índice, la misma materia prima para las dos vistas.
+function monthlyComparison(year) {
+  const datos = [];
+  for (let m = 0; m < 12; m++) {
+    const { start, end, futuro } = monthRange(year, m);
+    if (futuro) continue;
+    const bd = periodBreakdown(start, end);
+    const mine = bd && !bd.vacio ? bd.total.pct : null;
+    const bench = benchmarkReturn(start, end);
+    if (mine == null && bench == null) continue;
+    datos.push({ m, mine, bench });
+  }
+  return datos;
+}
+
+// Encadena los rendimientos mensuales en un acumulado del año. Encadenar (y no sumar)
+// es lo correcto: ganar 10% y luego 10% da 21%, no 20%. Además neutraliza las
+// aportaciones, así que la comparación con el índice es justa.
+function cumulativeSeries(datos, campo) {
+  let factor = 1;
+  return datos.map((d) => {
+    if (d[campo] != null) factor *= 1 + d[campo] / 100;
+    return (factor - 1) * 100;
+  });
+}
+
+const BENCH_MODE_KEY = "investmentTracker.benchMode";
+let benchMode = localStorage.getItem(BENCH_MODE_KEY) === "lineas" ? "lineas" : "barras";
+
+function renderBenchModeToggle() {
+  const box = document.getElementById("bench-mode-toggle");
+  box.innerHTML = "";
+  [
+    ["Barras (mes a mes)", "barras"],
+    ["Líneas (acumulado)", "lineas"],
+  ].forEach(([label, valor]) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "series-chip" + (benchMode === valor ? " active" : "");
+    btn.textContent = label;
+    btn.addEventListener("click", () => {
+      benchMode = valor;
+      localStorage.setItem(BENCH_MODE_KEY, valor);
+      renderBenchmarkBars(selectedYear);
+    });
+    box.appendChild(btn);
+  });
+}
+
+// Tu rendimiento contra el del índice, en barras (cada mes por separado) o en líneas
+// (acumulado del año). Línea de cero siempre visible: la mitad de los meses son negativos.
+function renderBenchmarkBars(year) {
+  const svg = document.getElementById("bench-chart");
+  const legend = document.getElementById("bench-legend");
+  const empty = document.getElementById("bench-empty");
+  const svgNS = "http://www.w3.org/2000/svg";
+  svg.innerHTML = "";
+  legend.innerHTML = "";
+  renderBenchModeToggle();
+
+  document.getElementById("bench-hint").textContent =
+    benchMode === "barras"
+      ? "Rendimiento de cada mes por separado frente al índice (iShares Core MSCI World, en euros). Barra más alta = ese mes lo batiste."
+      : "Rendimiento acumulado desde enero, encadenando los meses. La línea de arriba al final del año es la que ganó.";
+
+  const datos = monthlyComparison(year);
+
+  if (!datos.length) {
+    empty.hidden = false;
+    return;
+  }
+  empty.hidden = true;
+
+  const lineas = benchMode === "lineas";
+  const mineVals = lineas ? cumulativeSeries(datos, "mine") : datos.map((d) => d.mine);
+  const benchVals = lineas ? cumulativeSeries(datos, "bench") : datos.map((d) => d.bench);
+
+  const W = 920;
+  const H = 260;
+  const padLeft = 46;
+  const padRight = 12;
+  const padTop = 14;
+  const padBottom = 30;
+  const plotW = W - padLeft - padRight;
+  const plotH = H - padTop - padBottom;
+  const dark = isDarkMode();
+
+  let maxAbs = 0;
+  [...mineVals, ...benchVals].forEach((v) => {
+    if (v != null && Math.abs(v) > maxAbs) maxAbs = Math.abs(v);
+  });
+  maxAbs = maxAbs <= 0 ? 1 : maxAbs * 1.15;
+
+  const yScale = (v) => padTop + plotH / 2 - (v / maxAbs) * (plotH / 2);
+  const zeroY = yScale(0);
+  const g = document.createElementNS(svgNS, "g");
+
+  [maxAbs, maxAbs / 2, 0, -maxAbs / 2, -maxAbs].forEach((val) => {
+    const y = yScale(val);
+    const line = document.createElementNS(svgNS, "line");
+    line.setAttribute("x1", String(padLeft));
+    line.setAttribute("x2", String(W - padRight));
+    line.setAttribute("y1", y.toFixed(1));
+    line.setAttribute("y2", y.toFixed(1));
+    line.setAttribute("class", val === 0 ? "chart-baseline" : "chart-gridline");
+    g.appendChild(line);
+
+    const label = document.createElementNS(svgNS, "text");
+    label.setAttribute("x", String(padLeft - 8));
+    label.setAttribute("y", (y + 3).toFixed(1));
+    label.setAttribute("text-anchor", "end");
+    label.setAttribute("class", "chart-axis-label");
+    label.textContent = `${val > 0 ? "+" : ""}${val.toFixed(1)}%`;
+    g.appendChild(label);
+  });
+
+  const slot = plotW / datos.length;
+  const barW = Math.min(16, (slot - 8) / 2);
+  const colorMine = dark ? CATEGORICAL_HUES[0].dark : CATEGORICAL_HUES[0].light;
+  const colorBench = dark ? CATEGORICAL_HUES[3].dark : CATEGORICAL_HUES[3].light;
+
+  const cxOf = (i) => padLeft + slot * i + slot / 2;
+
+  if (lineas) {
+    [
+      { vals: mineVals, color: colorMine, name: "Tu cartera" },
+      { vals: benchVals, color: colorBench, name: BENCHMARK.name },
+    ].forEach(({ vals, color, name }) => {
+      const d = vals.map((v, i) => `${i === 0 ? "M" : "L"}${cxOf(i).toFixed(1)},${yScale(v).toFixed(1)}`).join(" ");
+      const path = document.createElementNS(svgNS, "path");
+      path.setAttribute("d", d);
+      path.setAttribute("class", "chart-line");
+      path.setAttribute("stroke", color);
+      g.appendChild(path);
+
+      vals.forEach((v, i) => {
+        const dot = document.createElementNS(svgNS, "circle");
+        dot.setAttribute("cx", cxOf(i).toFixed(1));
+        dot.setAttribute("cy", yScale(v).toFixed(1));
+        dot.setAttribute("r", i === vals.length - 1 ? "4" : "3");
+        dot.setAttribute("fill", color);
+        dot.setAttribute("class", "chart-end-dot");
+        const title = document.createElementNS(svgNS, "title");
+        title.textContent = `${MESES[datos[i].m]} ${year} · ${name} acumulado: ${fmtPct(v)}`;
+        dot.appendChild(title);
+        g.appendChild(dot);
+      });
+
+      // Etiqueta directa al final: con dos series se lee mejor que buscando en la leyenda.
+      const last = vals.length - 1;
+      const label = document.createElementNS(svgNS, "text");
+      label.setAttribute("x", (cxOf(last) + 8).toFixed(1));
+      label.setAttribute("y", (yScale(vals[last]) + 3).toFixed(1));
+      label.setAttribute("text-anchor", "end");
+      label.setAttribute("class", "chart-end-label");
+      label.setAttribute("fill", color);
+      label.textContent = fmtPct(vals[last]);
+      g.appendChild(label);
+    });
+  } else {
+    datos.forEach((d, i) => {
+      const cx = cxOf(i);
+      [
+        { v: d.mine, color: colorMine, dx: -barW - 1, name: "Tu cartera" },
+        { v: d.bench, color: colorBench, dx: 1, name: BENCHMARK.name },
+      ].forEach(({ v, color, dx, name }) => {
+        if (v == null) return;
+        const y = yScale(v);
+        const rect = document.createElementNS(svgNS, "rect");
+        rect.setAttribute("x", (cx + dx).toFixed(1));
+        rect.setAttribute("y", Math.min(y, zeroY).toFixed(1));
+        rect.setAttribute("width", barW.toFixed(1));
+        rect.setAttribute("height", Math.max(1, Math.abs(zeroY - y)).toFixed(1));
+        rect.setAttribute("fill", color);
+        rect.setAttribute("rx", "2");
+        const title = document.createElementNS(svgNS, "title");
+        title.textContent = `${MESES[d.m]} ${year} · ${name}: ${fmtPct(v)}`;
+        rect.appendChild(title);
+        g.appendChild(rect);
+      });
+    });
+  }
+
+  datos.forEach((d, i) => {
+    const label = document.createElementNS(svgNS, "text");
+    label.setAttribute("x", cxOf(i).toFixed(1));
+    label.setAttribute("y", String(H - 10));
+    label.setAttribute("text-anchor", "middle");
+    label.setAttribute("class", "chart-axis-label");
+    label.textContent = MESES[d.m];
+    g.appendChild(label);
+  });
+
+  svg.appendChild(g);
+
+  [
+    { name: "Tu cartera", color: colorMine },
+    { name: BENCHMARK.name, color: colorBench },
+  ].forEach((s) => {
+    const item = document.createElement("div");
+    item.className = "legend-item";
+    item.innerHTML = `<span class="legend-swatch" style="background:${s.color}"></span><span class="legend-label">${s.name}</span>`;
+    legend.appendChild(item);
+  });
+}
+
 const MESES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
 let selectedMonth = null; // null = el año entero
 
@@ -1794,10 +2107,18 @@ function renderMonthGrid(year) {
       box.innerHTML = `<span class="month-name">${MESES[m]}</span><span class="month-gain">—</span>`;
     } else {
       const g = data.total.gain;
+      const bench = benchmarkReturn(start, end);
+      const mine = data.total.pct;
+      // Diferencia contra el índice en puntos porcentuales: lo que de verdad dice si ese
+      // mes lo hiciste mejor o peor que el mercado.
+      const dif = mine != null && bench != null ? mine - bench : null;
       box.innerHTML =
         `<span class="month-name">${MESES[m]}</span>` +
         `<span class="month-gain ${g >= 0 ? "good" : "bad"}">${g >= 0 ? "▲" : "▼"} ${fmtMoney(Math.abs(g))}</span>` +
-        `<span class="month-pct ${g >= 0 ? "good" : "bad"}">${data.total.pct == null ? "—" : fmtPct(data.total.pct)}</span>`;
+        `<span class="month-pct ${g >= 0 ? "good" : "bad"}">${mine == null ? "—" : fmtPct(mine)}</span>` +
+        (dif == null
+          ? ""
+          : `<span class="month-vs ${dif >= 0 ? "good" : "bad"}">${dif >= 0 ? "bate" : "pierde"} ${Math.abs(dif).toFixed(1)} pp</span>`);
       box.addEventListener("click", () => {
         selectedMonth = activo ? null : m; // volver a pulsar deselecciona
         renderYearTab();
@@ -1856,13 +2177,29 @@ function renderYearTab() {
       : `${MESES[selectedMonth]} ${selectedYear}${rango.enCurso ? " (mes en curso)" : ""}`;
 
   heroLabel.textContent = `Ganancia en ${periodo}`;
+  if (data.vacio) {
+    heroValue.textContent = "—";
+    heroValue.className = "hero-value";
+    heroSub.textContent = "No hay datos de precios para este periodo.";
+    body.innerHTML = "";
+    renderBenchmarkBars(selectedYear);
+    return;
+  }
   heroValue.textContent = (total.gain >= 0 ? "▲ " : "▼ ") + fmtMoney(Math.abs(total.gain));
   heroValue.className = "hero-value " + (total.gain >= 0 ? "good" : "bad");
+  const bench = benchmarkReturn(rango.start, rango.end);
+  const dif = total.pct != null && bench != null ? total.pct - bench : null;
   heroSub.innerHTML =
     `<span>${total.pct == null ? "—" : fmtPct(total.pct)} sobre el capital invertido</span>` +
+    (bench == null
+      ? ""
+      : `<span class="${dif >= 0 ? "good" : "bad"}">${BENCHMARK.name}: ${fmtPct(bench)} · ` +
+        `${dif >= 0 ? "le sacás" : "te saca"} ${Math.abs(dif).toFixed(2)} pp</span>`) +
     `<span>${fmtMoney(total.vStart)} al empezar</span>` +
     `<span>${fmtMoney(total.aportado)} aportado</span>` +
     `<span>${fmtMoney(total.vEnd)} al ${rango.enCurso ? "día de hoy" : "cerrar el periodo"}</span>`;
+
+  renderBenchmarkBars(selectedYear);
 
   document.getElementById("year-table-title").textContent =
     selectedMonth == null ? "Qué aportó cada activo en el año" : `Qué aportó cada activo en ${periodo}`;
@@ -2008,12 +2345,17 @@ function renderProjectionChart() {
     `Es una extrapolación lineal del histórico (incluye aportaciones pasadas, no solo rentabilidad) y no garantiza resultados futuros.`;
 }
 
+// Índice de referencia: iShares Core MSCI World UCITS, cotizado en euros para que la
+// comparación no arrastre el efecto del tipo de cambio.
+const BENCHMARK = { symbol: "IWDA.AS", name: "MSCI World" };
+
 const RANGE_YEARS = { "1y": 1, "2y": 2, "5y": 5 };
 
-// Rejilla semanal común a todos los activos. Arranca en el movimiento más antiguo
-// (acotado por el rango elegido) y no solo donde empieza el histórico de Yahoo, que
-// para algunos fondos es mucho más corto que la posición real.
-function buildTimeGrid(holdingList, symbols, historyBySymbol, range) {
+// Rejilla semanal común a todos los activos. Arranca siempre en el movimiento más
+// antiguo, no solo donde empieza el histórico de Yahoo (que para algunos fondos es mucho
+// más corto que la posición real) ni donde llega el rango elegido: el desglose por año
+// necesita el historial completo, y el selector solo recorta lo que se dibuja.
+function buildTimeGrid(holdingList, symbols, historyBySymbol) {
   const WEEK = 7 * 24 * 3600;
   const nowTs = Math.floor(Date.now() / 1000);
 
@@ -2025,16 +2367,17 @@ function buildTimeGrid(holdingList, symbols, historyBySymbol, range) {
     earliest = Math.min(earliest, rec.points[0].t);
     latest = Math.max(latest, rec.points[rec.points.length - 1].t);
   });
+  // Todos los movimientos con fecha válida, no solo los que traen precio: si no, una
+  // compra sin precio dejaría su periodo fuera de la rejilla.
   holdingList.forEach((h) => {
-    movementPricePoints(h).forEach((p) => {
-      earliest = Math.min(earliest, p.t);
+    (h.movements || []).forEach((m) => {
+      if (!validMovementDate(m.fecha)) return;
+      earliest = Math.min(earliest, Math.floor(new Date(m.fecha).getTime() / 1000));
     });
   });
 
   if (!Number.isFinite(earliest)) return [];
 
-  const years = RANGE_YEARS[range];
-  if (years) earliest = Math.max(earliest, nowTs - years * 365.25 * 24 * 3600);
   const end = Math.max(latest, nowTs);
   if (end <= earliest) return [earliest];
 
@@ -2062,14 +2405,15 @@ async function loadPortfolioHistory() {
   try {
     const symbols = [...new Set(holdings.map((h) => h.symbol))];
     const needsFx = holdings.some((h) => (h.currency || "USD") !== "EUR");
-    const fetchSymbols = needsFx ? [...symbols, "EURUSD=X"] : symbols;
+    const fetchSymbols = [...symbols, BENCHMARK.symbol];
+    if (needsFx) fetchSymbols.push("EURUSD=X");
     const results = await fetchHistory(fetchSymbols, range);
     const historyBySymbol = Object.fromEntries(results.map((r) => [r.symbol, r]));
 
     const fxRec = historyBySymbol["EURUSD=X"];
     const fxPoints = fxRec && fxRec.points.length ? fxRec.points : null;
 
-    const masterTs = buildTimeGrid(holdings, symbols, historyBySymbol, range);
+    const masterTs = buildTimeGrid(holdings, symbols, historyBySymbol);
 
     if (masterTs.length === 0) {
       statusEl.textContent = "No se pudo cargar el histórico de precios.";
@@ -2111,12 +2455,14 @@ async function loadPortfolioHistory() {
     const firstValidIdx = totalValues.findIndex((v) => v != null);
     const trimStart = firstValidIdx > 0 ? firstValidIdx : 0;
 
+    const benchRec = historyBySymbol[BENCHMARK.symbol];
     lastPortfolioHistory = {
       masterTs: masterTs.slice(trimStart),
       totalValues: totalValues.slice(trimStart),
       investedValues: investedValues.slice(trimStart),
       cashValues: cashValues.slice(trimStart),
       assetSeries: assetSeries.map((s) => ({ holding: s.holding, values: s.values.slice(trimStart) })),
+      benchPoints: benchRec && benchRec.points && benchRec.points.length ? benchRec.points : null,
     };
 
     statusEl.textContent = "Actualizado: " + new Date().toLocaleTimeString("es-ES");

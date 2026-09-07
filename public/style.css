@@ -195,6 +195,25 @@ main {
 }
 .month-gain.good, .month-pct.good { color: var(--success-text); }
 .month-gain.bad, .month-pct.bad { color: var(--critical-text); }
+.month-vs {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin-top: 2px;
+}
+.month-vs.good { color: var(--success-text); }
+.month-vs.bad { color: var(--text-muted); }
+
+.chart-baseline {
+  stroke: var(--baseline);
+  stroke-width: 1.5;
+}
+.legend-row {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 10px;
+}
 @media (max-width: 600px) {
   .hero-value { font-size: 2rem; }
 }
@@ -450,6 +469,29 @@ td.remove button:hover { color: var(--critical-text); }
   font-size: 0.75rem;
   padding: 0 4px 0 0;
   vertical-align: middle;
+}
+
+.group-row td {
+  background: var(--page-plane);
+  font-weight: 600;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--baseline);
+  padding-top: 10px;
+  padding-bottom: 6px;
+}
+.group-row td:first-child { text-align: left; }
+.group-count {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--border);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 500;
 }
 
 .movements-row td {

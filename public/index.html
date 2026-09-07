@@ -115,6 +115,7 @@
         <pre class="import-log" id="import-log"></pre>
       </details>
 
+      <div class="series-toggle" id="group-toggle"></div>
       <table id="holdings-table">
         <thead>
           <tr>
@@ -207,6 +208,17 @@
       <div class="hero-value" id="year-hero-value">&mdash;</div>
       <div class="hero-sub" id="year-hero-sub"></div>
     </section>
+
+    <div class="card">
+      <h2>T&uacute; contra el MSCI World</h2>
+      <p class="chart-hint" id="bench-hint"></p>
+      <div class="series-toggle" id="bench-mode-toggle"></div>
+      <div class="line-chart-wrap" id="bench-wrap">
+        <svg id="bench-chart" viewBox="0 0 920 260" role="img" aria-label="Rendimiento mensual de la cartera frente al MSCI World"></svg>
+      </div>
+      <div class="legend legend-row" id="bench-legend"></div>
+      <div class="empty-state" id="bench-empty" hidden>Sin datos del &iacute;ndice para este a&ntilde;o.</div>
+    </div>
 
     <div class="card">
       <h2>Mes a mes</h2>
