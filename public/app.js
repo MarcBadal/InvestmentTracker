@@ -27,6 +27,17 @@ const MOVEMENT_TYPES = {
 // broker calcula el %. El importe neto del CSV ya las lleva, así que se prefiere y se pasa
 // a divisa con el tipo de cambio del día de la operación. Si falta (movimiento a mano, o
 // importado antes de guardar esos campos) se reconstruye con títulos x precio + comisión.
+// Importe en EUR de un movimiento. El CSV lo trae exacto (importe_neto_eur: con comisiones
+// y el cambio del día). Uno añadido a mano solo tiene títulos y precio, así que se
+// reconstruye y se convierte desde su divisa; si no, una venta manual no computaría como
+// ganancia realizada.
+function movementEur(m) {
+  if (m.importeEur != null) return m.importeEur;
+  const bruto = (m.titulos || 0) * (m.precioUnitario || 0);
+  if (!(bruto > 0)) return null;
+  return toEUR(bruto, m.divisa || "EUR");
+}
+
 function grossNativeOf(m) {
   if (m.importeEur != null) {
     if (m.tipoCambio > 0) return m.importeEur / m.tipoCambio;
@@ -66,7 +77,8 @@ function replayMovements(movements) {
       if (!arrastra) {
         costNative += m.titulos * m.precioUnitario;
         costNativeGross += grossNativeOf(m);
-        if (m.importeEur != null) costEUR += m.importeEur;
+        const entradaEur = movementEur(m);
+        if (entradaEur != null) costEUR += entradaEur;
         else hasEur = false;
       }
     } else if (qty > 0) {
@@ -76,8 +88,9 @@ function replayMovements(movements) {
         const avgGross = costNativeGross / qty;
         const avgEUR = costEUR / qty;
         // Ganancia realizada: lo cobrado por la venta menos el coste medio de lo vendido.
-        if (m.importeEur != null) {
-          const cobradoEUR = m.importeEur * (removeQty / m.titulos);
+        const ventaEur = movementEur(m);
+        if (ventaEur != null && m.titulos > 0) {
+          const cobradoEUR = ventaEur * (removeQty / m.titulos);
           realizedEUR += cobradoEUR - avgEUR * removeQty;
         }
         costNative -= avgNative * removeQty;
@@ -241,8 +254,11 @@ function isDarkMode() {
   return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
 }
 
-let holdings = loadHoldings();
+// fxRate se declara ANTES de cargar las posiciones: loadHoldings() recalcula cada una y
+// eso acaba llamando a toEUR(), que lo lee. Si se declarase después, la zona muerta
+// temporal de let lanzaría un ReferenceError y se caería el script entero al arrancar.
 let fxRate = null; // USD por 1 EUR (par EURUSD=X)
+let holdings = loadHoldings();
 const expandedIds = new Set();
 let editingSymbolId = null;
 let cancelingSymbolEdit = false;
@@ -609,8 +625,12 @@ async function resolveByIsin(holding, isin) {
   loadPortfolioHistory();
 }
 
-function initHoldingsTableEvents() {
-  const body = document.getElementById("holdings-body");
+// Se engancha a cualquier tabla de posiciones. Las cerradas también necesitan estos
+// eventos: si no, al vender todo la fila desaparece de la tabla principal y ya no hay
+// forma de corregir el precio de la venta.
+function initHoldingsTableEvents(bodyId = "holdings-body") {
+  const body = document.getElementById(bodyId);
+  if (!body) return;
 
   body.addEventListener("click", (e) => {
     const toggleBtn = e.target.closest(".toggle-movements");
@@ -719,6 +739,14 @@ function initHoldingsTableEvents() {
     else if (e.target.classList.contains("mov-titulos")) mov.titulos = parseFloat(e.target.value) || 0;
     else if (e.target.classList.contains("mov-precio")) mov.precioUnitario = parseFloat(e.target.value) || 0;
     else if (e.target.classList.contains("mov-origen")) mov.origen = e.target.value;
+
+    // Al tocar títulos o precio se recalcula el importe en euros y se congela, igual que
+    // hace el CSV. Si se dejara para el momento de pintar, dependería del tipo de cambio
+    // del día en que se recargue la página, no del de la operación.
+    if (e.target.classList.contains("mov-titulos") || e.target.classList.contains("mov-precio")) {
+      const bruto = (mov.titulos || 0) * (mov.precioUnitario || 0);
+      mov.importeEur = bruto > 0 ? toEUR(bruto, mov.divisa || holding.currency || "EUR") : null;
+    }
 
     recomputeHolding(holding);
     saveHoldings(holdings);
@@ -846,7 +874,7 @@ function cashMovements(holdingList) {
     (h.movements || []).forEach((m) => {
       const info = MOVEMENT_TYPES[m.kind];
       if (!info || m.contrapartida) return;
-      const importe = m.importeEur != null ? m.importeEur : m.titulos * m.precioUnitario;
+      const importe = movementEur(m); // convierte divisa, antes se sumaban dólares como euros
       if (!(importe > 0)) return;
       const t = Math.floor(new Date(m.fecha).getTime() / 1000);
       if (Number.isNaN(t)) return;
@@ -959,9 +987,11 @@ function positionCashflows(h) {
   let recuperado = 0;
   (h.movements || []).forEach((m) => {
     const info = MOVEMENT_TYPES[m.kind];
-    if (!info || m.contrapartida || m.importeEur == null) return;
-    if (info.tipo === "entrada") invertido += m.importeEur;
-    else recuperado += m.importeEur;
+    if (!info || m.contrapartida) return;
+    const eur = movementEur(m);
+    if (eur == null) return;
+    if (info.tipo === "entrada") invertido += eur;
+    else recuperado += eur;
   });
   const fechas = (h.movements || []).map((m) => m.fecha).filter(Boolean).sort();
   return { invertido, recuperado, desde: fechas[0], hasta: fechas[fechas.length - 1] };
@@ -1016,9 +1046,10 @@ function renderClosedPositions() {
     totalRec += recuperado;
     totalGain += gain;
 
+    const expanded = expandedIds.has(h.id);
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td class="symbol">${holdingLabel(h)}${h.closed ? "" : ' <span class="badge-partial">parcial</span>'}</td>
+      <td class="symbol"><button class="toggle-movements" type="button" data-id="${h.id}">${expanded ? "▾" : "▸"}</button> ${holdingLabel(h)}${h.closed ? "" : ' <span class="badge-partial">parcial</span>'}</td>
       <td><code class="ident">${h.symbol || "—"}</code></td>
       <td>${h.type || "—"}</td>
       <td>${fmtShortDate(desde)} → ${fmtShortDate(hasta)}</td>
@@ -1028,6 +1059,17 @@ function renderClosedPositions() {
       <td class="gain ${gain >= 0 ? "good" : "bad"}">${pct == null ? "—" : fmtPct(pct)}</td>
     `;
     body.appendChild(tr);
+
+    // Mismo panel de movimientos que en la tabla principal: aquí es donde se corrige el
+    // precio de una venta mal puesta.
+    const movTr = document.createElement("tr");
+    movTr.className = "movements-row";
+    movTr.hidden = !expanded;
+    const td = document.createElement("td");
+    td.colSpan = 8;
+    td.innerHTML = renderMovementsPanel(h);
+    movTr.appendChild(td);
+    body.appendChild(movTr);
   });
 
   const totalPct = totalInv > 0 ? (totalGain / totalInv) * 100 : 0;
@@ -1519,9 +1561,7 @@ async function refreshPrices() {
   symbols.push("EURUSD=X");
 
   try {
-    const res = await fetch(`/api/quotes?symbols=${encodeURIComponent(symbols.join(","))}`);
-    const quotes = await res.json();
-    const bySymbol = Object.fromEntries(quotes.map((q) => [q.symbol, q]));
+    const bySymbol = await fetchQuotes(symbols);
 
     if (bySymbol["EURUSD=X"] && bySymbol["EURUSD=X"].price) {
       fxRate = bySymbol["EURUSD=X"].price;
@@ -1563,6 +1603,9 @@ async function refreshPrices() {
       // cotiza el ticker, para poder detectar un ISIN resuelto al instrumento equivocado.
       return { ...h, lastPrice: price, name: h.name || q.name, quoteName: q.name, quoteCurrency: q.currency, quoteError: null };
     });
+    // Al cargar la página aún no se conocía el tipo de cambio, así que los movimientos en
+    // divisa sin importe congelado salían sin convertir. Ahora que hay tasa, se rehacen.
+    holdings.forEach(recomputeHolding);
     saveHoldings(holdings);
     document.getElementById("last-updated").textContent =
       "Actualizado: " + new Date().toLocaleTimeString("es-ES");
@@ -1578,8 +1621,7 @@ async function refreshPrices() {
 let lastPortfolioHistory = null;
 
 async function fetchHistory(symbols, range) {
-  const res = await fetch(`/api/history?symbols=${encodeURIComponent(symbols.join(","))}&range=${range}&interval=1wk`);
-  return res.json();
+  return getProvider().history(symbols, range);
 }
 
 function renderHistoryCharts() {
@@ -2667,15 +2709,13 @@ function consolidatePositions(rows) {
 
 async function resolveIsins(isins) {
   if (isins.length === 0) return {};
-  const res = await fetch(`/api/resolve?isins=${encodeURIComponent(isins.join(","))}`);
-  const results = await res.json();
+  const results = await getProvider().resolve(isins);
   return Object.fromEntries(results.map((r) => [r.isin, r]));
 }
 
 async function fetchQuotes(symbols) {
   if (!symbols.length) return {};
-  const res = await fetch(`/api/quotes?symbols=${encodeURIComponent(symbols.join(","))}`);
-  const quotes = await res.json();
+  const quotes = await getProvider().quotes(symbols);
   return Object.fromEntries(quotes.map((q) => [q.symbol, q]));
 }
 
@@ -2831,6 +2871,55 @@ document.getElementById("csv-import-btn").addEventListener("click", async () => 
   loadPortfolioHistory();
 });
 
+function initProviderPanel() {
+  const select = document.getElementById("provider-select");
+  const keyInput = document.getElementById("provider-key");
+  const note = document.getElementById("provider-note");
+  const result = document.getElementById("provider-result");
+  const badge = document.getElementById("provider-badge");
+  const testBtn = document.getElementById("provider-test");
+
+  Object.values(PROVIDERS).forEach((p) => {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = p.name;
+    select.appendChild(opt);
+  });
+
+  const pintar = () => {
+    const prov = PROVIDERS[select.value];
+    badge.textContent = PROVIDERS[getProviderId()].name;
+    keyInput.disabled = !prov.needsKey;
+    keyInput.placeholder = prov.needsKey ? "pega aquí tu clave" : "este proveedor no necesita clave";
+    note.innerHTML = prov.signupUrl
+      ? `${prov.note} <a href="${prov.signupUrl}" target="_blank" rel="noopener">Conseguir una clave gratis →</a>`
+      : prov.note;
+  };
+
+  select.value = getProviderId();
+  keyInput.value = getApiKey();
+  pintar();
+  select.addEventListener("change", pintar);
+
+  testBtn.addEventListener("click", async () => {
+    const id = select.value;
+    const key = keyInput.value.trim();
+    testBtn.disabled = true;
+    result.textContent = "Probando…";
+    result.className = "provider-result";
+    const r = await testProvider(id, key);
+    testBtn.disabled = false;
+    result.textContent = r.ok ? `✓ ${r.msg} — guardado.` : `✗ ${r.msg}`;
+    result.className = "provider-result " + (r.ok ? "good" : "bad");
+    if (!r.ok) return;
+    // Solo se cambia de proveedor si de verdad responde: si no, la app se quedaría muda.
+    setProviderConfig(id, key);
+    pintar();
+    refreshPrices();
+    loadPortfolioHistory();
+  });
+}
+
 function initPrivateToggle() {
   const btn = document.getElementById("private-toggle");
   const paint = () => {
@@ -2881,10 +2970,12 @@ function initTabs() {
 }
 
 initTabs();
+initProviderPanel();
 initPrivateToggle();
 initCashTile();
 initAssetDetailModal();
 initHoldingsTableEvents();
+initHoldingsTableEvents("closed-body");
 render();
 refreshPrices();
 renderHistoryCharts();

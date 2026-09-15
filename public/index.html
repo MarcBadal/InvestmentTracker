@@ -106,6 +106,27 @@
         </form>
       </details>
 
+      <details class="add-panel" id="provider-panel">
+        <summary>Origen de los precios <span id="provider-badge" class="provider-badge"></span></summary>
+        <p class="import-hint">
+          Los precios los pide <strong>tu navegador</strong> directamente al proveedor con <strong>tu propia clave</strong>.
+          No pasan por ning&uacute;n servidor intermedio ni se guarda tu clave en ning&uacute;n sitio que no sea este navegador.
+        </p>
+        <div class="provider-form">
+          <div>
+            <label for="provider-select">Proveedor</label>
+            <select id="provider-select"></select>
+          </div>
+          <div>
+            <label for="provider-key">Clave de API</label>
+            <input type="password" id="provider-key" placeholder="pega aqu&iacute; tu clave" autocomplete="off" spellcheck="false">
+          </div>
+          <button type="button" id="provider-test">Probar y guardar</button>
+        </div>
+        <p class="provider-note" id="provider-note"></p>
+        <p class="provider-result" id="provider-result"></p>
+      </details>
+
       <details class="import-panel" id="import-panel">
         <summary>Importar movimientos desde CSV</summary>
         <p class="import-hint">Archivo con columnas separadas por <code>;</code>: fecha, isin, valor, tipo_activo, mercado, divisa, operacion, titulos, precio_unitario, comision_divisa, tipo_cambio_eur, importe_neto_eur, titulos_netos, flujo_eur, dinero_nuevo, contrapartida, nota. Se consolidan compras/ventas y suscripciones/reembolsos por ISIN y se resuelve el ticker autom&aacute;ticamente.</p>
@@ -305,6 +326,7 @@
     </div>
   </div>
 </main>
+<script src="providers.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
